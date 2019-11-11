@@ -147,7 +147,8 @@ static AM_ErrorCode_t am_rec_insert_pat(AM_REC_Recorder_t *rec)
 		return AM_REC_ERROR_BASE;
 	}
 
-	am_rec_packet_data(rec->rec_fd, 0, psec->p_data, psec->i_length + 3, 10);
+	if (program.i_pid > 0 && program.i_pid < 0x1fff)
+		am_rec_packet_data(rec->rec_fd, 0, psec->p_data, psec->i_length + 3, 10);
 
 	dvbpsi_DeletePSISections(psec);
 
@@ -352,8 +353,14 @@ static AM_ErrorCode_t am_rec_start_dvr(AM_REC_Recorder_t *rec)
 		ADD_PID(minfo->teletexts[i].pid);
 	}
 
-	ADD_PID(rec->rec_para.program.i_pid);
-	
+	if (rec->rec_para.program.i_pid != 0)
+		ADD_PID(rec->rec_para.program.i_pid);
+
+	for (i = 0; i < rec->rec_para.ext_pids.count; i++) {
+		if (rec->rec_para.ext_pids.pids[i] != 0)
+			ADD_PID(rec->rec_para.ext_pids.pids[i]);
+	}
+
 	return AM_DVR_StartRecord(rec->create_para.dvr_dev, &spara);
 }
 

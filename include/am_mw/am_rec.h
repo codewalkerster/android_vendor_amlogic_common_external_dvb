@@ -100,6 +100,12 @@ typedef struct
 	char	store_dir[AM_REC_PATH_MAX];	/**< Store file's path*/
 }AM_REC_CreatePara_t;
 
+typedef struct
+{
+	int count;
+	uint16_t pids[AM_DVR_MAX_PID_COUNT];
+}AM_REC_Pids_t;
+
 /**\brief Recording parameters*/
 typedef struct
 {
@@ -111,6 +117,7 @@ typedef struct
 	char prefix_name[AM_REC_NAME_MAX];    /**< Filename prefix*/
 	char suffix_name[AM_REC_SUFFIX_MAX];  /**< Filename suffix*/
 	AM_Crypt_Ops_t *crypt_ops;
+	AM_REC_Pids_t ext_pids;
 }AM_REC_RecPara_t;
 
 /**\brief Recording information*/
