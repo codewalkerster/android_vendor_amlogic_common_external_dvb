@@ -4,7 +4,7 @@
  * This source code is subject to the terms and conditions defined in the
  * file 'LICENSE' which is part of this source code package.
  *
- * Description: 
+ * Description:
  */
 #ifdef _FORTIFY_SOURCE
 #undef _FORTIFY_SOURCE
@@ -36,6 +36,37 @@ typedef struct
 	pthread_t          thread;
 	AM_SUB2_Picture_t *pic;
 }AM_SUB2_Parser_t;
+
+static int pts_bigger_than(uint32_t pts1, uint32_t pts2)
+{
+	int ret = 0;
+
+	if (pts1 >= pts2)
+	{
+		if ((pts1 - pts2) > (1<<31))
+			ret = 0;
+		else
+			ret = 1;
+	}
+	else if (pts1 < pts2)
+	{
+		if ((pts2 - pts1) > (1<<31))
+			ret = 1;
+		else
+			ret = 0;
+	}
+
+	return ret;
+}
+
+static uint32_t get_video_pts()
+{
+#define VIDEO_PTS_PATH "/sys/class/tsync/pts_video"
+	char buffer[16] = {0};
+
+	AM_FileRead(VIDEO_PTS_PATH,buffer,16);
+	return strtoul(buffer, NULL, 16);
+}
 
 static void sub2_check(AM_SUB2_Parser_t *parser)
 {
@@ -95,6 +126,11 @@ static void sub2_check(AM_SUB2_Parser_t *parser)
 	if(parser->running && (old != parser->pic))
 	{
 		parser->para.show(parser, parser->pic);
+		if (parser->para.report_available && (parser->pic != NULL))
+		{
+			AM_DEBUG(0, "report_available pic: %p", parser->pic);
+			parser->para.report_available(parser);
+		}
 	}
 }
 
@@ -215,6 +251,9 @@ AM_SUB2_GetUserData(AM_SUB2_Handle_t handle)
 AM_ErrorCode_t AM_SUB2_Decode(AM_SUB2_Handle_t handle, uint8_t *buf, int size)
 {
 	AM_SUB2_Parser_t *parser;
+	int ret;
+	uint32_t pts = 0;
+	uint32_t vpts = 0;
 
 	if(!handle)
 	{
@@ -228,8 +267,23 @@ AM_ErrorCode_t AM_SUB2_Decode(AM_SUB2_Handle_t handle, uint8_t *buf, int size)
 
 	parser = (AM_SUB2_Parser_t*)handle;
 
+	pts |= ((buf[9] >> 1) & 0x03) << 30;
+	pts |= ((((buf[10] << 8) | buf[11]) >> 1) & 0x7fff) << 15;
+	pts |= ((((buf[12] << 8) | buf[13]) >> 1) & 0x7fff);
+
+	vpts = get_video_pts();
+	AM_DEBUG(0, "AM_SUB2_Decode vpts %x pts %x", vpts, pts);
+
+	if (pts_bigger_than(vpts, pts + 90000))
+	{
+		if (parser->para.report)
+			parser->para.report(parser, AM_SUB2_Decoder_Error_TimeError);
+	}
+
 	pthread_mutex_lock(&parser->lock);
-	dvbsub_parse_pes_packet(parser->handle, buf, size);
+	ret = dvbsub_parse_pes_packet(parser->handle, buf, size);
+	if (ret < 0 && parser->para.report)
+		parser->para.report(parser, AM_SUB2_Decoder_Error_InvalidData);
 	sub2_check(parser);
 	pthread_mutex_unlock(&parser->lock);
 

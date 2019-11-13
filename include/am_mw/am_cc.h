@@ -92,6 +92,8 @@ typedef void (*AM_CC_VBIRatingCb_t)(AM_CC_Handle_t handle, vbi_rating *rating);
 typedef void (*AM_CC_DataCb_t)(AM_CC_Handle_t handle, int mask);
 
 typedef void (*AM_CC_UpdataJson_t)(AM_CC_Handle_t handle);
+typedef void (*AM_CC_ReportError)(AM_CC_Handle_t handle, int error);
+
 
 typedef enum {
     CC_STATE_RUNNING      = 0x1001,
@@ -210,6 +212,15 @@ typedef enum {
 	AM_CC_INPUT_VBI       /**< Input from VBI.*/
 }AM_CC_Input_t;
 
+enum AM_CC_Decoder_Error
+{
+	AM_CC_Decoder_Error_LoseData,
+	AM_CC_Decoder_Error_InvalidData,
+	AM_CC_Decoder_Error_TimeError,
+	AM_CC_Decoder_Error_END
+};
+
+
 /**\brief Close caption parser's create parameters*/
 typedef struct
 {
@@ -229,6 +240,7 @@ typedef struct
 	AM_CC_DrawBegin_t   draw_begin;    /**< Drawing beginning callback*/
 	AM_CC_DrawEnd_t     draw_end;      /**< Drawing end callback*/
 	AM_CC_UpdataJson_t json_update;
+	AM_CC_ReportError report;
 	char *json_buffer;
 }AM_CC_CreatePara_t;
 

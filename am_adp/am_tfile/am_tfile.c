@@ -451,9 +451,12 @@ static int aml_timeshift_subfile_close(AM_TFile_t tfile)
 			close(sub_file->wfd);
 		}
 
-		if (tfile->is_timeshift)
+		if (tfile->delete_on_close)
 		{
-			snprintf(fname, sizeof(fname), "%s.%d", tfile->name, sub_file->findex);
+			if (sub_file->findex == 0 && !tfile->is_timeshift)
+				snprintf(fname, sizeof(fname), "%s", tfile->name);
+			else
+				snprintf(fname, sizeof(fname), "%s.%d", tfile->name, sub_file->findex);
 			AM_DEBUG(1, "[tfile] unlinking file: %s", fname);
 			unlink(fname);
 		}
@@ -552,6 +555,8 @@ AM_ErrorCode_t AM_TFile_Open(AM_TFile_t *tfile, const char *file_name, AM_Bool_t
 	pfile->is_timeshift = (strstr(pfile->name, "TimeShifting") != NULL);
 	pfile->loop = loop;
 	pfile->duration = max_duration;
+	if (pfile->is_timeshift)
+		pfile->delete_on_close = 1;
 
 	if (pfile->loop)
 	{
@@ -679,7 +684,10 @@ ssize_t AM_TFile_Read(AM_TFile_t tfile, uint8_t *buf, size_t size, int timeout)
 		tfile->read %= tfile->size;
 		ret = size - todo;
 	}
-
+	if (tfile->read == 0) {
+		AM_DEBUG(0, "[tfile] reed is set 0 need to seek 0");
+		aml_timeshift_subfile_seek(tfile, 0, AM_TRUE);
+	}
 read_done:
 	if (ret > 0)
 	{
@@ -796,7 +804,11 @@ adjust_pos:
 		off_t sleft = tfile->size - tfile->total;
 
 		tfile->write = (tfile->write + size_act) % tfile->size;
-
+		if (tfile->write == 0) {
+			/*rewind the file*/
+			AM_DEBUG(0, "[tfile] write == 0, need seek write(0)read(%lld)", tfile->read);
+			aml_timeshift_subfile_seek(tfile, 0, AM_FALSE);
+		}
 		//check the start pointer
 		if (size_act > sleft) {
 			if (tfile->timer) {
@@ -945,6 +957,21 @@ loff_t AM_TFile_Tell(AM_TFile_t tfile)
 
 	pthread_mutex_lock(&tfile->lock);
 	ret = tfile->read;
+	pthread_mutex_unlock(&tfile->lock);
+	return ret;
+}
+
+loff_t AM_TFile_GetAvailable(AM_TFile_t tfile)
+{
+	int ret = 0;
+	if (! tfile->opened)
+	{
+		AM_DEBUG(0, "[tfile] has not opened");
+		return AM_FAILURE;
+	}
+
+	pthread_mutex_lock(&tfile->lock);
+	ret = tfile->avail;
 	pthread_mutex_unlock(&tfile->lock);
 	return ret;
 }

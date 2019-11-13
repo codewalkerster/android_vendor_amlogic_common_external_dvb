@@ -49,6 +49,14 @@ enum AM_SUB2_ErrorCode
 	AM_SUB2_ERR_END
 };
 
+enum AM_SUB2_Decoder_Error
+{
+	AM_SUB2_Decoder_Error_LoseData,
+	AM_SUB2_Decoder_Error_InvalidData,
+	AM_SUB2_Decoder_Error_TimeError,
+	AM_SUB2_Decoder_Error_END
+};
+
 /**\brief Subtitle region*/
 typedef struct AM_SUB2_Region
 {
@@ -101,12 +109,16 @@ typedef void (*AM_SUB2_ShowCb_t)(AM_SUB2_Handle_t handle, AM_SUB2_Picture_t* pic
 
 /**\brief get current PTS*/
 typedef uint64_t (*AM_SUB2_GetPTS_t)(AM_SUB2_Handle_t handle, uint64_t pts);
+typedef void (*AM_SUB2_ReportError)(AM_SUB2_Handle_t handle, int error);
+typedef void (*AM_SUB2_PicAvailable)(AM_SUB2_Handle_t handle);
 
 /**\brief Subtitle parameter*/
 typedef struct
 {
 	AM_SUB2_ShowCb_t show;           /**< callback function of show subtitle*/
 	AM_SUB2_GetPTS_t get_pts;        /**< current PTS*/
+	AM_SUB2_ReportError report;
+	AM_SUB2_PicAvailable report_available;
 	uint16_t         composition_id; /**< Subtitle composition ID*/
 	uint16_t         ancillary_id;   /**< Subtitle ancillary ID*/
 	void            *user_data;      /**< user private data*/

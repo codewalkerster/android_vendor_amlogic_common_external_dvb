@@ -1581,7 +1581,11 @@ AM_ErrorCode_t AM_SI_GetDVBTextCodingAndData(char *in, int in_len, char *coding,
 		} else if (fbyte == 0x13) {
 			SET_CODING("GB2312");
 		} else if (fbyte == 0x14) {
-			SET_CODING("big5hk");
+                        if (!strcmp(forced_dvb_text_coding, "unicode")) {/*unicode or big5hk*/
+                            SET_CODING(forced_dvb_text_coding);
+                        } else {
+                            SET_CODING("big5hk");
+                        }
 		} else if (fbyte == 0x15) {
 			SET_CODING("utf-8");
 		} else if (fbyte >= 0x20) {
@@ -2015,7 +2019,7 @@ AM_ErrorCode_t AM_SI_ExtractAVFromES(dvbpsi_pmt_es_t *es, int *vid, int *vfmt, A
 			AM_SI_LIST_END()
 			break;
 		case 0x8A:
-		case 0x82:
+		//case 0x82:
 		case 0x85:
 		case 0x86:
 			afmt_tmp = AFORMAT_DTS;
@@ -2220,6 +2224,41 @@ AM_ErrorCode_t AM_SI_ExtractAVFromVC(dvbpsi_atsc_vct_channel_t *vcinfo, int *vid
 		}
 	AM_SI_LIST_END()
 
+	return AM_SUCCESS;
+}
+
+AM_ErrorCode_t AM_SI_ExtractScte27SubtitleFromES(dvbpsi_pmt_es_t *es, AM_SI_Scte27SubtitleInfo_t *sub_info)
+{
+	dvbpsi_descriptor_t *descr;
+	int i, found = 0;
+
+	if (es->i_type == 0x82)
+	{
+		for (i=0; i<sub_info->subtitle_count; i++)
+		{
+			if (es->i_pid == sub_info->subtitles[i].pid)
+			{
+				found = 1;
+				break;
+			}
+		}
+
+		if (found != 1)
+		{
+			sub_info->subtitles[sub_info->subtitle_count].pid = es->i_pid;
+			sub_info->subtitle_count++;
+		}
+
+		AM_DEBUG(0, "Scte27 stream found pid 0x%x count %d", es->i_pid, sub_info->subtitle_count);
+		AM_SI_LIST_BEGIN(es->p_first_descriptor, descr)
+		{
+			if (descr->p_decoded)
+			{
+				AM_DEBUG(0, "scte27 i_tag table_id 0x%x", descr->i_tag);
+			}
+		}
+		AM_SI_LIST_END()
+	}
 	return AM_SUCCESS;
 }
 

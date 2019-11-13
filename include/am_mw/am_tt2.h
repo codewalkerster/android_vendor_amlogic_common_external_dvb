@@ -59,11 +59,28 @@ typedef enum{
 	AM_TT2_COLOR_BLUE           /**< blue*/
 }AM_TT2_Color_t;
 
+/**\brief Teletext color*/
+typedef enum{
+	AM_TT2_DisplayMode_ShowAll,
+}AM_TT2_DisplayMode_t;
+
+
 /**\brief start draw teletext callback function*/
 typedef void (*AM_TT2_DrawBegin_t)(AM_TT2_Handle_t handle);
 
 /**\brief stop draw teletext callback function*/
-typedef void (*AM_TT2_DrawEnd_t)(AM_TT2_Handle_t handle);
+typedef void (*AM_TT2_DrawEnd_t)(AM_TT2_Handle_t handle,
+								 int page_type,
+								 int pgno,
+								 char* subs,
+								 int sub_cnt,
+							     int red,
+							     int green,
+							     int yellow,
+							     int blue,
+								 int curr_subpg);
+
+typedef void (*AM_TT2_NotifyData_t)(AM_TT2_Handle_t handle, int pgno);
 
 /**\brief get PTS callback function */
 typedef uint64_t (*AM_TT2_GetPTS_t)(AM_TT2_Handle_t handle, uint64_t pts);
@@ -71,14 +88,21 @@ typedef uint64_t (*AM_TT2_GetPTS_t)(AM_TT2_Handle_t handle, uint64_t pts);
 /**\brief get new teletext page callback function */
 typedef void (*AM_TT2_NewPage_t)(AM_TT2_Handle_t handle, int pgno, int sub_pgno);
 
+typedef enum {
+	AM_TT_INPUT_PES,
+	AM_TT_INPUT_VBI
+}AM_TT_Input_t;
+
 /**\brief Teletext parameter*/
 typedef struct
 {
+	AM_TT_Input_t input;
 	AM_TT2_DrawBegin_t draw_begin;   /**< start draw teletext callback function*/
 	AM_TT2_DrawEnd_t   draw_end;     /**< stop draw teletext callback function*/
+	AM_TT2_NotifyData_t     notify_contain_data;
 	AM_TT2_NewPage_t   new_page;     /**< get new teletext page callback function*/
 	AM_Bool_t        is_subtitle;    /**< is subtitle or not*/
-	uint8_t         *bitmap;         /**< draw bitmap buffer*/
+	uint8_t         **bitmap;         /**< draw bitmap buffer*/
 	int              pitch;          /**< the length of draw bitmap buffer per line*/
 	void            *user_data;      /**< user data*/
 	int             default_region;  /**< default region，see vbi_font_descriptors in libzvbi/src/lang.c*/
@@ -106,6 +130,12 @@ extern AM_ErrorCode_t AM_TT2_Destroy(AM_TT2_Handle_t handle);
  * \return Error code
  */
 extern AM_ErrorCode_t AM_TT2_SetSubtitleMode(AM_TT2_Handle_t handle, AM_Bool_t subtitle);
+extern AM_ErrorCode_t AM_TT2_SetTTDisplayMode(AM_TT2_Handle_t handle, int mode);
+extern AM_ErrorCode_t AM_TT2_SetRevealMode(AM_TT2_Handle_t handle, int mode);
+extern AM_ErrorCode_t AM_TT2_LockSubpg(AM_TT2_Handle_t handle, int lock);
+extern AM_ErrorCode_t AM_TT2_GotoSubtitle(AM_TT2_Handle_t handle);
+extern AM_ErrorCode_t AM_TT2_SetRegion(AM_TT2_Handle_t handle, int region_id);
+
 
 /**\brief get user private data
  * \param handle the handle of parser
@@ -127,7 +157,7 @@ extern AM_ErrorCode_t AM_TT2_Decode(AM_TT2_Handle_t handle, uint8_t *buf, int si
  * \retval AM_SUCCESS On success
  * \return Error code
  */
-extern AM_ErrorCode_t AM_TT2_Start(AM_TT2_Handle_t handle);
+extern AM_ErrorCode_t AM_TT2_Start(AM_TT2_Handle_t handle, int region_id);
 
 /**\brief stop show teletext
  * \param handle the handle of parser

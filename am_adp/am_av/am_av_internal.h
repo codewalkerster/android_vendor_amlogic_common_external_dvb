@@ -55,6 +55,7 @@ typedef struct
 	AM_AV_AFormat_t afmt;            /**< 音频流格式*/
 	uint16_t        sub_apid;        /**< sub音频流PID*/
 	AM_AV_AFormat_t sub_afmt;        /**< sub音频流格式*/
+	AM_AV_DrmMode_t drm_mode;
 } AV_TSPlayPara_t;
 
 /**\brief TS流播放器*/
@@ -97,6 +98,7 @@ typedef struct {
 	AM_AV_InjectPara_t para;
 	int                sub_aud_pid;
 	AM_AV_AFormat_t    sub_aud_fmt;
+	AM_AV_DrmMode_t    drm_mode;
 }AV_InjectPlayPara_t;
 
 /**\brief 数据注入播放器参数*/
@@ -245,6 +247,7 @@ typedef struct {
 	AV_DataPlayPara_t     aes;
 	AV_DataPlayPara_t     ves;
 	AV_TimeShiftPlayPara_t   time_shift;
+	AM_AV_DrmMode_t       drm_mode;
 }AM_AV_PlayPara_t;
 
 /**\brief 音视频解码设备*/
@@ -285,6 +288,13 @@ struct AM_AV_Device
 	void				*ad_date;
 	int                          afd_enable;
 	AM_USERDATA_AFD_t            afd;
+	AM_Crypt_Ops_t               *crypt_ops;
+	void                         *cryptor;
+	AM_Bool_t	replay_enable;		/*enable or disable replay when abnormal*/
+
+	/*for audio switching*/
+	uint16_t                     alt_apid;
+	AM_AV_AFormat_t              alt_afmt;
 };
 
 /****************************************************************************

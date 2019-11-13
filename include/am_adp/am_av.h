@@ -38,6 +38,7 @@
 #include "am_misc.h"
 #include "am_tfile.h"
 #include "am_userdata.h"
+#include "am_crypt.h"
 #include <amports/vformat.h>
 #include <amports/aformat.h>
 
@@ -115,6 +116,7 @@ enum AM_AV_EventType
 	AM_AV_EVT_VIDEO_RESOLUTION_CHANGED, /**< Video resolution changed, the parameter is the AM_AV_VideoStatus_t with new width&height valid only */
 	AM_AV_EVT_VIDEO_AFD_CHANGED, /**< Video AFD info changed, parameter is AM_USERDATA_AFD_t*/
 	AM_AV_EVT_VIDEO_CROPPING_CHANGED,    /**< Video cropping change, the parameter is the new cropping window(AM_AV_VideoWindow_t)*/
+	AM_AV_EVT_PLAYER_EOF,              /**< Update the current player information*/
 	AM_AV_EVT_END
 };
 
@@ -386,7 +388,6 @@ typedef struct
 	int              channel;     /**< Audio channel number (used in playing audio PCM data)*/
 	int              sample_rate; /**< Audio sample rate (used in playing audio PCM data)*/
 	int              data_width;  /**< Audio data width (used in playing audio PCM data)*/
-	int              drm_mode;    /**< Drm mode*/
 } AM_AV_InjectPara_t;
 
 /**\brief Video decoder status*/
@@ -759,7 +760,7 @@ extern AM_ErrorCode_t AM_AV_StopAudioES(int dev_no);
  * \retval AM_SUCCESS On success
  * \return Error code
  */
-extern AM_ErrorCode_t AM_AV_SetDRMMode(int dev_no, int enable);
+extern AM_ErrorCode_t AM_AV_SetDRMMode(int dev_no, AM_AV_DrmMode_t drm_mode);
 
 /**\brief Start AV data injection playing mode
  * \param dev_no AV decoder device number
@@ -1220,6 +1221,15 @@ extern AM_ErrorCode_t AM_AV_GetVideoPts(int dev_no, uint64_t *pts);
  * \return Error code
  */
 extern AM_ErrorCode_t AM_AV_GetAudioPts(int dev_no, uint64_t *pts);
+
+/**
+ * brief Set Crypt operators
+ * \param dev_no AV decoder device number
+ * \param ops Crypt ops
+ * \retval AM_SUCCESS On success
+ * \return Error code
+ */
+extern AM_ErrorCode_t AM_AV_SetCryptOps(int dev_no, AM_Crypt_Ops_t *ops);
 
 #ifdef __cplusplus
 }

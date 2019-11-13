@@ -41,6 +41,7 @@
 #define IS_SCTE(p)  ((p[0]==0x3) && ((p[1]&0x7f) == 1))
 
 #define IS_AFD(p)	((p[0] == 0x44) && (p[1] == 0x54) && (p[2] == 0x47) && (p[3] == 0x31))
+#define IS_H264_AFD(p)	((p[0] == 0xb5) && (p[3] == 0x44) && (p[4] == 0x54) && (p[5] == 0x47) && (p[6] == 0x31))
 
 #define AMSTREAM_IOC_MAGIC  'S'
 #define AMSTREAM_IOC_UD_LENGTH _IOR(AMSTREAM_IOC_MAGIC, 0x54, unsigned long)
@@ -288,7 +289,7 @@ static userdata_type aml_check_userdata_format (uint8_t *buf, int vfmt, int len)
 			AM_DEBUG(AM_DEBUG_LEVEL,"CC format is directv_cc_type");
 			return DIRECTV_CC_TYPE;
 		}
-		else if (IS_AFD(buf))
+		else if (IS_H264_AFD(buf))
 		{
 			return H264_AFD_TYPE;
 		}
@@ -705,6 +706,41 @@ static int aml_process_mpeg_userdata(AM_USERDATA_Device_t *dev, uint8_t *data, i
 	return r;
 }
 
+static void aml_h264_userdata_package(AM_USERDATA_Device_t *dev, int poc, int type, uint8_t *p, int len, uint32_t
+	pts, int pts_valid, uint32_t duration)
+{
+	AM_UDDrvData *ud = dev->drv_data;
+
+	AM_DEBUG(0, "cc h264 poc: %d curr: %d", poc, ud->curr_poc);
+	if (poc == 0)
+		aml_flush_cc_data(dev);
+
+	if ((poc == ud->curr_poc + 1) || (poc == ud->curr_poc + 2)) {
+		AM_CCData *cc, **pcc;
+
+		aml_write_userdata(dev, p, len, pts, pts_valid, duration);
+		ud->curr_poc = poc;
+
+		pcc = &ud->cc_list;
+		while ((cc = *pcc)) {
+			if ((ud->curr_poc + 1 != cc->poc) && (ud->curr_poc + 2 != cc->poc))
+				break;
+
+			aml_write_userdata(dev, cc->buf, cc->size, cc->pts, cc->pts_valid, cc->duration);
+			*pcc = cc->next;
+			ud->curr_poc = cc->poc;
+
+			cc->next = ud->free_list;
+			ud->free_list = cc;
+			ud->cc_num --;
+		}
+
+		return;
+	}
+
+	aml_add_cc_data(dev, poc, I_TYPE, p, len, pts, pts_valid, duration);
+}
+
 static int aml_process_h264_userdata(AM_USERDATA_Device_t *dev, uint8_t *data, int len, struct userdata_meta_info_t* meta_info)
 {
 	AM_UDDrvData *ud = dev->drv_data;
@@ -737,19 +773,21 @@ static int aml_process_h264_userdata(AM_USERDATA_Device_t *dev, uint8_t *data, i
 				aml_flush_cc_data(dev);
 			}
 
-			aml_add_cc_data(dev, poc, I_TYPE, pd, pl, pts, meta_info->vpts_valid,
+			//aml_add_cc_data(dev, poc, I_TYPE, pd, pl, pts, meta_info->vpts_valid,
+			//	meta_info->duration);
+
+			//aml_add_cc_data(dev, poc, I_TYPE, userdata_with_pts, pl+4);
+			aml_h264_userdata_package(dev, poc, I_TYPE, pd, pl, pts, meta_info->vpts_valid,
 				meta_info->duration);
 
 			pd   += pl;
 			left -= pl + hdr;
 			r	+= pl + hdr;
-		} else if (MOD_ON_AFD(ud->mode) && IS_AFD(pd)) {
-			AM_USERDATA_AFD_t afd = *((AM_USERDATA_AFD_t*)pd);
+		} else if (MOD_ON_AFD(ud->mode) && IS_H264_AFD(pd)) {
+			AM_USERDATA_AFD_t afd = *((AM_USERDATA_AFD_t*)(pd + 7));
+			afd.reserved = afd.pts = 0;
 			AM_EVT_Signal(dev->dev_no, AM_USERDATA_EVT_AFD, (void*)&afd);
-
-			pd   += 8;
-			left -= 8;
-			r	+= 8;
+			break;
 		} else {
 			pd   += 8;
 			left -= 8;
