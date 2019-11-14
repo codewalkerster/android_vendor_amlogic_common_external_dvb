@@ -542,27 +542,24 @@ static int am_cc_render(AM_CC_Decoder_t *cc)
 			{
 				AM_DEBUG(AM_DEBUG_LEVEL, "render_thread pts gap large than 0, value %d", decode_time_gap);
 				has_data_to_render = 0;
-				goto NEXT_NODE;
+				node = node->json_chain_next;
+				continue;
 			}
 			AM_DEBUG(AM_DEBUG_LEVEL, "render_thread pts in range, node->pts %x videopts %x", node->pts, cc->video_pts);
 		}
-		/* If gap of node time and now time is too big, discard */
-		// decode_time_gap = (now.tv_sec - node->decode_time.tv_sec)*1000 +
-			// (now.tv_nsec - node->decode_time.tv_nsec)/1000;
-//		if (decode_time_gap < 300)
-		{
+
 		if (cc->cpara.json_buffer)
 		{
-				memcpy(cc->cpara.json_buffer, node->buffer, JSON_STRING_LENGTH);
-				has_data_to_render = 1;
-        	}
-			AM_DEBUG(AM_DEBUG_LEVEL, "json--> %s", node->buffer);
-			if (cc->cpara.json_update && has_data_to_render)
-				cc->cpara.json_update(cc);
+			memcpy(cc->cpara.json_buffer, node->buffer, JSON_STRING_LENGTH);
+			has_data_to_render = 1;
 		}
+		AM_DEBUG(AM_DEBUG_LEVEL, "json--> %s", node->buffer);
+		if (cc->cpara.json_update && has_data_to_render)
+			cc->cpara.json_update(cc);
+
 		//AM_DEBUG(1, "Render json: %s, %d", node->buffer, count);
 		//count++;
-NEXT_NODE:
+CLEAN_NODE:
 		node_reset = node;
 		node->json_chain_prior->json_chain_next = node->json_chain_next;
 		node->json_chain_next->json_chain_prior = node->json_chain_prior;

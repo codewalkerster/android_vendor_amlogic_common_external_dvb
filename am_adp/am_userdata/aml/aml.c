@@ -710,35 +710,53 @@ static void aml_h264_userdata_package(AM_USERDATA_Device_t *dev, int poc, int ty
 	pts, int pts_valid, uint32_t duration)
 {
 	AM_UDDrvData *ud = dev->drv_data;
+	AM_CCData *cc;
 
-	AM_DEBUG(0, "cc h264 poc: %d curr: %d", poc, ud->curr_poc);
 	if (poc == 0)
 		aml_flush_cc_data(dev);
 
-	if ((poc == ud->curr_poc + 1) || (poc == ud->curr_poc + 2)) {
-		AM_CCData *cc, **pcc;
+	aml_add_cc_data(dev, poc, I_TYPE, p, len, pts, pts_valid, duration);
 
-		aml_write_userdata(dev, p, len, pts, pts_valid, duration);
-		ud->curr_poc = poc;
-
-		pcc = &ud->cc_list;
-		while ((cc = *pcc)) {
-			if ((ud->curr_poc + 1 != cc->poc) && (ud->curr_poc + 2 != cc->poc))
-				break;
-
+	cc = ud->cc_list;
+	while (cc) {
+		if ((ud->curr_poc + 1 == cc->poc) || (ud->curr_poc + 2 == cc->poc))
+		{
 			aml_write_userdata(dev, cc->buf, cc->size, cc->pts, cc->pts_valid, cc->duration);
-			*pcc = cc->next;
+
 			ud->curr_poc = cc->poc;
+
+			//If node is chain head, reset chain head
+			if (cc == ud->cc_list)
+			{
+				ud->cc_list = cc->next;
+			}
+			else
+			{
+				//Delete node from chain
+				AM_CCData *cc_tmp = ud->cc_list;
+				while (cc_tmp)
+				{
+					if (cc_tmp->next == cc)
+					{
+						cc_tmp->next = cc->next;
+						break;
+					}
+					else
+						cc_tmp = cc_tmp->next;
+				}
+			}
 
 			cc->next = ud->free_list;
 			ud->free_list = cc;
 			ud->cc_num --;
+
+			cc = ud->cc_list;
 		}
-
-		return;
+		else
+		{
+			cc = cc->next;
+		}
 	}
-
-	aml_add_cc_data(dev, poc, I_TYPE, p, len, pts, pts_valid, duration);
 }
 
 static int aml_process_h264_userdata(AM_USERDATA_Device_t *dev, uint8_t *data, int len, struct userdata_meta_info_t* meta_info)
