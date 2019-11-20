@@ -2585,8 +2585,8 @@ static AM_ErrorCode_t aml_start_timeshift(AV_TimeshiftData_t *tshift, AV_TimeShi
 
 		audio_ops->adec_start_decode(ts->fd, tp->afmt, has_video, &ts->adec);
 
-		if (VALID_PID(tshift_para->sub_aud_pid))
-			aml_set_audio_ad(tshift->dev, 1, tshift_para->sub_aud_pid, tshift_para->sub_aud_fmt);
+		if (VALID_PID(tp->sub_apid))
+			aml_set_audio_ad(tshift->dev, 1, tp->sub_apid, tp->sub_afmt);
 	}
 	if (ioctl(ts->fd, AMSTREAM_IOC_PORT_INIT, 0) == -1)
 	{
@@ -7162,8 +7162,6 @@ static AM_ErrorCode_t aml_switch_ts_audio_fmt(AM_AV_Device_t *dev, AV_TSData_t *
 	AM_Bool_t has_audio = AM_FALSE;
 	AM_Bool_t has_video = AM_FALSE;
 	AM_Bool_t has_pcr = AM_FALSE;
-	int sub_apid;
-	AM_AV_AFormat_t sub_afmt;
 
 	if (!ts || !tp) {
 		AM_DEBUG(1, "do switch ts audio, illegal operation, current mode [%d]", dev->mode);
@@ -7239,8 +7237,8 @@ static AM_ErrorCode_t aml_switch_ts_audio_fmt(AM_AV_Device_t *dev, AV_TSData_t *
 		aml_calc_sync_mode(dev, has_audio, has_video, has_pcr, tp->afmt, NULL));
 	audio_ops->adec_start_decode(ts->fd, tp->afmt, has_video, &ts->adec);
 
-	if (VALID_PID(sub_apid))
-		aml_set_audio_ad(dev, 1, sub_apid, sub_afmt);
+	if (VALID_PID(tp->sub_apid))
+		aml_set_audio_ad(dev, 1, tp->sub_apid, tp->sub_afmt);
 #endif /*ENABLE_PCR*/
 	AM_DEBUG(1, "switch ts audio: end");
 	return AM_SUCCESS;
@@ -7473,8 +7471,8 @@ static AM_ErrorCode_t aml_set_audio_ad(AM_AV_Device_t *dev, int enable, uint16_t
 		case AV_TIMESHIFT:
 			adec = ((AV_TimeshiftData_t*)dev->timeshift_player.drv_data)->ts.adec;
 			pad = &((AV_TimeshiftData_t*)dev->timeshift_player.drv_data)->ts.ad;
-			sub_apid = dev->timeshift_player.para.sub_aud_pid;
-			sub_afmt = dev->timeshift_player.para.sub_aud_fmt;
+			sub_apid = ((AV_TimeshiftData_t*)dev->timeshift_player.drv_data)->tp.sub_apid;
+			sub_afmt = ((AV_TimeshiftData_t*)dev->timeshift_player.drv_data)->tp.sub_afmt;
 			break;
 		default:
 			AM_DEBUG(1, "only valid in TS/INJ/TIMESHIFT mode");
@@ -7525,8 +7523,8 @@ static AM_ErrorCode_t aml_set_audio_ad(AM_AV_Device_t *dev, int enable, uint16_t
 			dev->inject_player.para.sub_aud_fmt = afmt;
 			break;
 		case AV_TIMESHIFT:
-			dev->timeshift_player.para.sub_aud_pid = apid;
-			dev->timeshift_player.para.sub_aud_fmt = afmt;
+			((AV_TimeshiftData_t*)dev->timeshift_player.drv_data)->tp.sub_apid = apid;
+			((AV_TimeshiftData_t*)dev->timeshift_player.drv_data)->tp.sub_afmt = afmt;
 			break;
 		default:
 			break;
