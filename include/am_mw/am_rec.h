@@ -98,6 +98,11 @@ typedef struct
 	int		dvr_dev;		/**< DVR device number*/
 	int		async_fifo_id;	        /**< Ayncfifo device's index*/
 	char	store_dir[AM_REC_PATH_MAX];	/**< Store file's path*/
+#ifdef SUPPORT_CAS
+	int		is_smp;			/*Secure media path enable or not*/
+	uint8_t *secure_buf;	/*used to store DVR data*/
+	char	cas_dat_path[AM_REC_PATH_MAX];
+#endif
 }AM_REC_CreatePara_t;
 
 typedef struct
@@ -118,6 +123,10 @@ typedef struct
 	char suffix_name[AM_REC_SUFFIX_MAX];  /**< Filename suffix*/
 	AM_Crypt_Ops_t *crypt_ops;
 	AM_REC_Pids_t ext_pids;
+#ifdef SUPPORT_CAS
+	AM_CAS_encrypt enc_cb;
+	uint32_t cb_param;
+#endif
 }AM_REC_RecPara_t;
 
 /**\brief Recording information*/
@@ -129,6 +138,14 @@ typedef struct
 	AM_REC_CreatePara_t create_para;	/**< Create parameters*/
 	AM_REC_RecPara_t record_para;	/**< Recording parameters*/
 }AM_REC_RecInfo_t;
+
+#ifdef SUPPORT_CAS
+typedef struct
+{
+	uint32_t addr;
+	uint32_t len;
+}AM_Rec_SecureBlock_t;
+#endif
 
 /****************************************************************************
  * Function prototypes  

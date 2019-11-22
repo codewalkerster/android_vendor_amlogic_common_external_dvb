@@ -96,6 +96,9 @@ endif
 
 #LOCAL_32_BIT_ONLY := true
 
+ifeq ($(SUPPORT_CAS), y)
+LOCAL_CFLAGS+=-DSUPPORT_CAS
+endif
 include $(BUILD_SHARED_LIBRARY)
 
 include $(CLEAR_VARS)
@@ -166,6 +169,9 @@ endif
 else
 LOCAL_C_INCLUDES += external/icu/icu4c/source/common
 LOCAL_SHARED_LIBRARIES+= libzvbi libsqlite libam_adp liblog libdl libc libcutils libicui18n
+endif
+ifeq ($(SUPPORT_CAS), y)
+LOCAL_CFLAGS+=-DSUPPORT_CAS
 endif
 LOCAL_PRELINK_MODULE := false
 

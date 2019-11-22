@@ -71,6 +71,10 @@ typedef struct
     int       tfile_flag;
     AM_TFile_t      tfile;
 	void                    *cryptor;
+#ifdef SUPPORT_CAS
+	int				cas_dat_fd;
+	int				cas_dat_write;
+#endif
 }AM_REC_Recorder_t;
 
 /****************************************************************************

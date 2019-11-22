@@ -14,6 +14,8 @@
 
 DVB_TOP := $(call my-dir)
 
+SUPPORT_CAS := n
+
 ifeq (1,$(strip $(shell expr $(PLATFORM_SDK_VERSION) \>= 22)))
 include $(DVB_TOP)/am_sysfs/Android.mk $(DVB_TOP)/am_adp/Android.mk $(DVB_TOP)/am_mw/Android.mk $(DVB_TOP)/am_ver/Android.mk
 else

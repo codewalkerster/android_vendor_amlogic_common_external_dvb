@@ -22,6 +22,10 @@
 
 #include <unistd.h>
 //#include <sys/types.h>
+#ifdef SUPPORT_CAS
+#include <limits.h>
+#include <byteswap.h>
+#endif
 #include <sys/stat.h>
 #include <fcntl.h>
 #include <am_types.h>
@@ -35,6 +39,9 @@
 #include "am_evt.h"
 #include "am_time.h"
 #include "am_tfile.h"
+#ifdef SUPPORT_CAS
+#include "am_av.h"
+#endif
 
 #include "list.h"
 
@@ -57,7 +64,27 @@ typedef struct {
 	AM_TFile_t file;
 } tfile_timer_t;
 
+#ifdef SUPPORT_CAS
+typedef struct
+{
+	struct list_head list;
+	uint64_t start;
+	uint64_t end;
+	uint16_t info_len;
+	uint8_t *info_data;
+} tfile_cas_t;
 
+static tfile_cas_t cas_ctx = {0};
+static cas_info_data[16] = {0};
+static CAS_RecInfo_t cas_rec_info = {
+.blk_size = 0,
+.len = 0,
+.data = cas_info_data
+};
+#define CAS_MAGIC_NUM 0xBEEFBEEF
+#define NODE_IS_REWIND(p) \
+	(p->end <= p->start ? 1 : 0)
+#endif
 /****************************************************************************
  * Static functions
  ***************************************************************************/
@@ -618,6 +645,221 @@ AM_ErrorCode_t AM_TFile_Close(AM_TFile_t tfile)
 	return AM_SUCCESS;
 }
 
+#ifdef SUPPORT_CAS
+AM_ErrorCode_t AM_TFile_CasOpen(char *path)
+{
+	int fd, ret;
+	uint32_t blk_size;
+	uint16_t info_len;
+	uint64_t pos;
+	tfile_cas_t *pcas = NULL;
+
+	AM_DEBUG(3, "%s in\n", __func__);
+	if (!path) {
+		INIT_LIST_HEAD(&cas_ctx.list);
+		AM_DEBUG(0, "[tfile] cas dat path null");
+		return AM_SUCCESS;
+	}
+	fd = open(path, O_RDONLY);
+	if (fd < 0) {
+		AM_DEBUG(0, "[tfile] open cas file failed");
+		return AM_FAILURE;
+	}
+
+	if ((ret = read(fd, &blk_size, 4)) != 4) {
+		AM_DEBUG(0, "[tfile] read cas block size failed");
+		goto fail;
+	}
+
+	if ((ret = read(fd, &info_len, 2)) != 2) {
+		AM_DEBUG(0, "[tfile] read cas header info len failed");
+		goto fail;
+	}
+
+	cas_rec_info.blk_size = bswap_32(blk_size);
+	cas_rec_info.len =  bswap_16(info_len);
+	if ((ret = read(fd, cas_rec_info.data, cas_rec_info.len)) != cas_rec_info.len) {
+		AM_DEBUG(0, "[tfile] read cas header data failed");
+		goto fail;
+	}
+
+	INIT_LIST_HEAD(&cas_ctx.list);
+	AM_DEBUG(0, "[tfile] cas block size:%d, header info len:%d, seek:%d\n",
+			bswap_32(blk_size), bswap_16(info_len), ret);
+	do {
+		if ((ret = read(fd, &pos, 8)) != 8) {
+			AM_DEBUG(0, "[tfile] read cas pos failed, ret:%d. maybe end of file", ret);
+			close(fd);
+			return AM_SUCCESS;
+		}
+		AM_DEBUG(0, "[tfile] read cas pos:%lld", bswap_64(pos));
+		if ((ret = read(fd, &info_len, 2)) != 2) {
+			AM_DEBUG(0, "[tfile] read cas info len failed");
+			goto fail;
+		}
+
+		info_len = bswap_16(info_len);
+		AM_DEBUG(0, "[tfile] read cas store info len:%d", info_len);
+		if (pos == ULLONG_MAX) {
+			break;
+		}
+		pcas = malloc(sizeof(tfile_cas_t));
+		pcas->info_data = malloc(info_len);
+		pcas->info_len = info_len;
+		pcas->start = bswap_64(pos);
+		if ((ret = read(fd, pcas->info_data, pcas->info_len)) != pcas->info_len) {
+			AM_DEBUG(0, "[tfile] read cas info len failed");
+			goto fail;
+		}
+		AM_DEBUG(0, "[tfile] read cas store info");
+		list_add_tail(&pcas->list, &cas_ctx.list);
+		AM_DEBUG(0, "[tfile] add cas list");
+	} while (1);
+
+	close(fd);
+	return AM_SUCCESS;
+
+fail:
+	if (fd > 0) {
+		close(fd);
+	}
+	return AM_FAILURE;
+}
+AM_ErrorCode_t AM_TFile_CasClose()
+{
+	struct list_head *pos, *q;
+	tfile_cas_t *pcas;
+
+	AM_DEBUG(3, "%s in\n", __func__);
+	list_for_each_safe(pos, q, &cas_ctx.list) {
+		pcas = list_entry(pos, tfile_cas_t, list);
+		list_del(pos);
+		free(pcas->info_data);
+		free(pcas);
+	}
+	return AM_SUCCESS;
+}
+
+AM_ErrorCode_t AM_TFile_CasUpdateStoreInfo(uint32_t len, uint64_t fsize)
+{
+	struct list_head *pos, *q;
+	tfile_cas_t *pfirst, *plast;
+
+	plast = list_entry(cas_ctx.list.prev, tfile_cas_t, list);
+	pfirst = list_first_entry(&cas_ctx.list, tfile_cas_t, list);
+	if (plast->end == CAS_MAGIC_NUM) {
+		//the last node end pos no value
+		plast->end = (plast->start + len) % fsize;
+	} else {
+		//the last node end pos already had value
+		if (plast == pfirst && NODE_IS_REWIND(plast)) {
+			//only 1 node and rewind
+			plast->start = (plast->start + len) % fsize;
+		}
+		plast->end = (plast->end + len) % fsize;
+	}
+
+	AM_DEBUG(2, "%s, first:%lld, %lld, last:%lld-%lld, arg len:%d, fsize:%lld\n", __func__,
+			pfirst->start, pfirst->end, plast->start, plast->end, len, fsize);
+	if (plast == pfirst) {
+		AM_DEBUG(1, "%s, only 1 node\n", __func__);
+		return 0;
+	}
+
+	if((plast->start <= pfirst->start && plast->end > pfirst->start) ||
+			(NODE_IS_REWIND(plast) && plast->end > pfirst->start)) {
+		AM_DEBUG(0, "plast and pfirst has coincide area, pfirst:%lld, plast:%lld\n",
+				pfirst->start, plast->end);
+		pfirst->start = plast->end;
+		if (pfirst->start == pfirst->end) {
+			AM_DEBUG(0, "last node overwrite first node, delete first node\n");
+			list_del(&pfirst->list);
+		}
+	}
+
+	return 0;
+}
+
+AM_ErrorCode_t AM_TFile_CasSetStoreInfo(CAS_StoreInfo_t info)
+{
+	tfile_cas_t *pcas, *plast;
+
+	pcas = malloc(sizeof(tfile_cas_t));
+	pcas->info_data = malloc(info.len);
+	pcas->info_len = info.len;
+	pcas->start = info.pos;
+	pcas->end = CAS_MAGIC_NUM;
+	memcpy(pcas->info_data, info.data, info.len);
+	AM_DEBUG(0, "%s set cas store info, len:%d, pos:%lld", __func__, info.len, info.pos);
+	list_add_tail(&pcas->list, &cas_ctx.list);
+
+	return AM_SUCCESS;
+}
+
+AM_ErrorCode_t AM_TFile_CasGetStoreInfo(uint64_t stream_pos, CAS_StoreInfo_t *info)
+{
+	struct list_head *pos, *q;
+	tfile_cas_t *pcas, *pstart;
+
+	list_for_each_safe(pos, q, &cas_ctx.list) {
+		AM_DEBUG(0, "Get store info loop");
+		pcas = list_entry(pos, tfile_cas_t, list);
+		AM_DEBUG(0, "Get store info %lld->%lld", pcas->start, pcas->end);
+		if (NODE_IS_REWIND(pcas)) {
+			AM_DEBUG(2, "%s, >> %d, pos:%lld, start-end:%lld-%lld\n",
+					__func__, __LINE__, stream_pos, pcas->start, pcas->end);
+			if (stream_pos > pcas->start || stream_pos <= pcas->end) {
+				//seems like can NOT change info->pos value, otherwise vmx report DVR channel already in used 
+				info->pos = 0;//pcas->start;
+				info->len = pcas->info_len;
+				memcpy(info->data, pcas->info_data, pcas->info_len);
+				AM_DEBUG(1, "%s found rewind store info, pos:%lld-%lld, stream_pos:%lld, info_len:%d\n", __func__,
+						pcas->start, pcas->end, stream_pos, pcas->info_len);
+				return 0;
+			}
+		} else {
+			AM_DEBUG(2, "%s, >> %d, pos:%lld, start-end:%lld-%lld\n",
+					__func__, __LINE__, stream_pos, pcas->start, pcas->end);
+			if (stream_pos > pcas->start && stream_pos <= pcas->end) {
+				//seems like can NOT change info->pos value, otherwise vmx report DVR channel already in used 
+				info->pos = 0;//pcas->start;
+				info->len = pcas->info_len;
+				memcpy(info->data, pcas->info_data, pcas->info_len);
+				AM_DEBUG(1, "%s found store info, pos:%lld-%lld, stream_pos:%lld\n", __func__,
+						pcas->start, pcas->end, stream_pos);
+				return 0;
+			}
+		}
+	}
+
+	AM_DEBUG(0, "Get store info failed");
+	return AM_FAILURE;
+}
+
+AM_ErrorCode_t AM_TFile_CasGetRecInfo(CAS_RecInfo_t *info)
+{
+	if (info) {
+		info->blk_size = cas_rec_info.blk_size;
+		info->len = cas_rec_info.len;
+		if (info->data)
+			memcpy(info->data, cas_rec_info.data, info->len);
+		return AM_SUCCESS;
+	}
+	return AM_FAILURE;
+}
+AM_ErrorCode_t AM_TFile_CasDump()
+{
+	struct list_head *pos, *q;
+	tfile_cas_t *pcas;
+	list_for_each_safe(pos, q, &cas_ctx.list) {
+		pcas = list_entry(pos, tfile_cas_t, list);
+		AM_DEBUG(0, "%s, cas info len:%d, pos:%lld", __func__, pcas->info_len, pcas->start);
+	}
+
+	return AM_SUCCESS;
+}
+#endif
+
 ssize_t AM_TFile_Read(AM_TFile_t tfile, uint8_t *buf, size_t size, int timeout)
 {
 	ssize_t ret = -1;
@@ -910,7 +1152,7 @@ write_done:
 	return ret + ret2;
 }
 
-/**\brief seek到指定的偏移，如越界则返回1*/
+/**\brief seek到指定的偏移，如越界则返�?*/
 int AM_TFile_Seek(AM_TFile_t tfile, loff_t offset)
 {
 	int ret = 1;

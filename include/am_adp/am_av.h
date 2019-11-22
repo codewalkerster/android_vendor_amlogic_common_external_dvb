@@ -483,6 +483,13 @@ typedef struct
 	AM_TFile_t tfile;
 	int offset_ms;
 	AM_Bool_t start_paused;
+#ifdef SUPPORT_CAS
+	int  secure_enable;			/*Use for cas PVR/TimeShift playback*/
+	uint8_t *secure_buffer;	/*Use for sotre cas decrypt pvr data**/
+	char cas_file_path[256];/*Store Cas info file*/
+	AM_CAS_decrypt dec_cb;
+	uint32_t cb_param;
+#endif
 } AM_AV_TimeshiftPara_t;
 
 /**\brief Timeshift lpaying information*/
@@ -1230,7 +1237,6 @@ extern AM_ErrorCode_t AM_AV_GetAudioPts(int dev_no, uint64_t *pts);
  * \return Error code
  */
 extern AM_ErrorCode_t AM_AV_SetCryptOps(int dev_no, AM_Crypt_Ops_t *ops);
-
 #ifdef __cplusplus
 }
 #endif

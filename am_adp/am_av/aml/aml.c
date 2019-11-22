@@ -41,6 +41,10 @@
 #include <cutils/properties.h>
 #endif
 #include "am_ad.h"
+
+#ifdef SUPPORT_CAS
+#include "aml_drm.h"
+#endif
 #include <am_cond.h>
 #include "am_userdata.h"
 
@@ -327,6 +331,12 @@ static AM_ErrorCode_t set_dec_control(AM_Bool_t enable);
  * param, AKA volume.
  */
 extern int audio_decode_set_volume(void *, float);
+#ifdef SUPPORT_CAS
+#define SECURE_BLOCK_SIZE 256*1024
+/* Round up the even multiple of size, size has to be a multiple of 2 */
+#define ROUNDUP(v, size) (((v) + ((__typeof__(v))(size) - 1)) & \
+													~((__typeof__(v))(size) - 1))
+#endif
 /****************************************************************************
  * Type definitions
  ***************************************************************************/
@@ -455,6 +465,10 @@ typedef struct
 	AV_TSData_t			ts;
 
 	int                     pause_time;
+#ifdef SUPPORT_CAS
+	int cas_open;
+	uint8_t *buf;
+#endif
 } AV_TimeshiftData_t;
 
 struct AM_AUDIO_Driver
@@ -2270,6 +2284,14 @@ static AV_TimeshiftData_t* aml_create_timeshift_data(void)
 	memset(tshift, 0, sizeof(AV_TimeshiftData_t));
 	tshift->ts.fd = -1;
 	tshift->ts.vid_fd = -1;
+#ifdef SUPPORT_CAS
+	tshift->buf = malloc(SECURE_BLOCK_SIZE);
+	if (!tshift->buf) {
+		AM_DEBUG(0, "alloc timeshihft buffer failed");
+		free(tshift);
+		return NULL;
+	}
+#endif
 
 	return tshift;
 }
@@ -2426,7 +2448,11 @@ static AM_ErrorCode_t aml_start_timeshift(AV_TimeshiftData_t *tshift, AV_TimeShi
 	snprintf(buf, sizeof(buf), DVB_STB_DEMUXSOURCE_FILE, para->dmx_id);
 	AM_FileRead(buf, tshift->last_dmx_src, 16);
 	AM_FileEcho(buf, "hiu");
-
+#ifdef SUPPORT_CAS
+        if (para->secure_enable)
+                snprintf(buf, sizeof(buf), "%d", 256*1024);
+        else
+#endif
 	snprintf(buf, sizeof(buf), "%d", 32*1024);
 	AM_FileEcho(DVB_STB_ASYNCFIFO_FLUSHSIZE_FILE, buf);
 
@@ -2567,9 +2593,31 @@ static AM_ErrorCode_t aml_start_timeshift(AV_TimeshiftData_t *tshift, AV_TimeShi
 		AM_DEBUG(1, "amport init failed");
 		return AM_AV_ERR_SYS;
 	}
-
+#ifdef SUPPORT_CAS
+	if (para->secure_enable) {
+		AM_FileEcho("/sys/module/decoder_common/parameters/force_nosecure_even_drm", "1");
+		if (ioctl(ts->fd, AMSTREAM_IOC_SET_DRMMODE, (void *)(long)(1)) == -1)
+		{
+			AM_DEBUG(0, "%s, set drm enable failed", __func__);
+			return AM_AV_ERR_SYS;
+		}
+		AM_DEBUG(3, "%s, set drm enable success", __func__);
+	} else {
+		AM_FileEcho("/sys/module/decoder_common/parameters/force_nosecure_even_drm", "0");
+		if (ioctl(ts->fd, AMSTREAM_IOC_SET_DRMMODE, (void *)(long)(0)) == -1)
+		{
+			AM_DEBUG(0, "%s, set drm disable failed", __func__);
+			return AM_AV_ERR_SYS;
+		}
+		AM_DEBUG(3, "%s, set drm disable success", __func__);
+	}
+#endif
 	/*no blank for timeshifting play*/
 	AM_FileEcho(VID_BLACKOUT_FILE, "0");
+
+#ifdef SUPPORT_CAS
+	AM_EVT_Signal(tshift->dev->dev_no, AM_AV_EVT_PLAYER_STATE_CHANGED, NULL);
+#endif
 
 	if (create_thread)
 	{
@@ -2586,6 +2634,14 @@ static AM_ErrorCode_t aml_start_timeshift(AV_TimeshiftData_t *tshift, AV_TimeShi
 						(para->mode == AM_AV_TIMESHIFT_MODE_TIMESHIFTING && tshift->duration > 0),
 						tshift->duration,
 						0));
+#ifdef SUPPORT_CAS
+			if (para->secure_enable && !tshift->cas_open) {
+				if (AM_SUCCESS == AM_TFile_CasOpen(para->cas_file_path)) {
+					AM_TFile_CasDump();
+					tshift->cas_open = 1;
+				}
+			}
+#endif
 			if (para->mode == AM_AV_TIMESHIFT_MODE_TIMESHIFTING) {
 				AM_TFile_TimeStart(tshift->file);
 				AM_DEBUG(1, "[timeshift] start TFile timer %p", tshift->file);
@@ -2686,6 +2742,12 @@ static void aml_destroy_timeshift_data(AV_TimeshiftData_t *tshift, AM_Bool_t des
 
 		if (!(tshift->file_flag & TIMESHIFT_TFILE_DETACHED))
 			AM_TFile_Close(tshift->file);
+#ifdef SUPPORT_CAS
+		if (tshift->cas_open) {
+			AM_TFile_CasClose();
+			tshift->cas_open = 0;
+		}
+#endif
 	}
 
 	if (tshift->ts.fd != -1)
@@ -2716,8 +2778,15 @@ static void aml_destroy_timeshift_data(AV_TimeshiftData_t *tshift, AM_Bool_t des
 		}
 	}
 
-	if (destroy_thread)
+	if (destroy_thread) {
+#ifdef SUPPORT_CAS
+		if (tshift->buf) {
+			free(tshift->buf);
+			tshift->buf = NULL;
+		}
+#endif
 		free(tshift);
+	}
 }
 
 static int am_timeshift_reset(AV_TimeshiftData_t *tshift, int deinterlace_val, AM_Bool_t start_audio)
@@ -2777,6 +2846,13 @@ static int am_timeshift_fffb(AV_TimeshiftData_t *tshift)
 			next_time = tshift->current + speed * 1000;
 			next_time = am_timeshift_playback_time_check(tshift, next_time);
 			offset = (loff_t)next_time / 1000 * tshift->rate;
+#ifdef SUPPORT_CAS
+			if (tshift->para.para.secure_enable) {
+				offset = ROUNDUP(offset, SECURE_BLOCK_SIZE);
+				if (tshift->para.para.mode == AM_AV_TIMESHIFT_MODE_PLAYBACK)
+					offset += 188*11;//skip pat and meida info header,clear data not encrypt
+			}
+#endif
 			AM_TFile_Seek(tshift->file, offset);
 			AM_DEBUG(2, "[timeshift] next time: time[%d] offset[%lld]", next_time, offset);
 		}
@@ -2949,6 +3025,12 @@ static int aml_timeshift_do_play_cmd(AV_TimeshiftData_t *tshift, AV_PlayCmd_t cm
 			} else {
 				tshift->seek_pos = am_timeshift_playback_time_check(tshift, tshift->seek_pos);
 				offset = (loff_t)tshift->seek_pos / 1000 * (loff_t)tshift->rate;
+#ifdef SUPPORT_CAS
+				if (tshift->para.para.secure_enable) {
+					offset = ROUNDUP(offset, SECURE_BLOCK_SIZE);
+					offset += 188*11;//skip pat and meida info header,clear data not encrypt
+				}
+#endif
 				AM_DEBUG(1, "[timeshift] [seek] offset: time:%dms off:%lld", tshift->seek_pos, offset);
 				AM_TFile_Seek(tshift->file, offset);
 			}
@@ -3105,6 +3187,22 @@ static char *cmd2string(int cmd)
 	}
 	return string_cmd[cmd];
 }
+#ifdef SUPPORT_CAS
+static int build_drm_pkg(uint8_t *outpktdata, uint8_t *addr, uint32_t size)
+{
+	drminfo_t drminfo;
+
+	memset(&drminfo, 0, sizeof(drminfo_t));
+	drminfo.drm_level = DRM_LEVEL1;
+	drminfo.drm_pktsize = size;
+	drminfo.drm_hasesdata = 0;
+	drminfo.drm_phy = (unsigned int)addr;
+	drminfo.drm_flag = TYPE_DRMINFO;
+	memcpy(outpktdata, &drminfo, sizeof(drminfo_t));
+
+	return 0;
+}
+#endif
 /**\brief Timeshift 线程*/
 static void *aml_timeshift_thread(void *arg)
 {
@@ -3112,7 +3210,17 @@ static void *aml_timeshift_thread(void *arg)
 	int speed, update_time, now/*, fffb_time*/;
 	int len, ret;
 	int /*dmxfd,*/ trick_stat;
+#ifdef SUPPORT_CAS
+	int secure_enable = tshift->para.para.secure_enable;
+	uint8_t *buf = tshift->buf;
+	AM_CAS_CryptPara_t cparam;
+	uint64_t pos, offset, sec_remain_data_len;
+	uint8_t drm_pkt[sizeof(drminfo_t)];
+	uint8_t store_info[512];
+	uint8_t rec_info[16];
+#else
 	uint8_t buf[64*1024];
+#endif
 	const int FFFB_STEP = 150;
 	struct timespec rt;
 	AM_AV_TimeshiftInfo_t info;
@@ -3177,7 +3285,11 @@ static void *aml_timeshift_thread(void *arg)
 		aml_timeshift_do_play_cmd(tshift, cmd, &info);
 
 		/*read some bytes*/
+#ifdef SUPPORT_CAS
+		len = SECURE_BLOCK_SIZE - tshift->left;
+#else
 		len = sizeof(buf) - tshift->left;
+#endif
 		if (len > 0)
 		{
 			if (has_video) {
@@ -3247,30 +3359,43 @@ static void *aml_timeshift_thread(void *arg)
 				 *	## end of 100351
 				 */
 			}
+#ifdef SUPPORT_CAS
+                        if (secure_enable && AM_TFile_Tell(tshift->file) == 0 && is_playback_mode) {
+                                /*Skip pat and media_info ts packet, not encrypt*/
+                                ret = AM_TFile_Read(tshift->file, buf, 188*11, 100);
+                                AM_DEBUG(0, "%s skip pat and media info, %#x,%#x,%#x,%#x", __func__,
+                                                buf[0], buf[1], buf[2], buf[3]);
+                        }
+			do {
+#endif
+				ret = aml_timeshift_fetch_data(tshift, buf+tshift->left, len - tshift->left, 100);
+				if (ret > 0)
+				{
+					tshift->left += ret;
+					fetch_fail = 0;
+				}
+				else if (len - tshift->left != 0)
+				{
+					int error = errno;
+					//AM_DEBUG(4, "read playback file failed: %s", strerror(errno));
+					fetch_fail++;
+					/*fetch fail, treat as data break*/
+					if (fetch_fail == 1000)
+					{
+						AM_DEBUG(1, "[timeshift] data break, eof, try:%d", len);
+						AM_EVT_Signal(tshift->dev->dev_no, AM_AV_EVT_PLAYER_EOF, NULL);
+					}
 
-			ret = aml_timeshift_fetch_data(tshift, buf+tshift->left, len, 100);
-			if (ret > 0)
-			{
-				tshift->left += ret;
-				fetch_fail = 0;
-			}
-			else if (len != 0)
-			{
-				int error = errno;
-				//AM_DEBUG(4, "read playback file failed: %s", strerror(errno));
-				fetch_fail++;
-				/*fetch fail, treat as data break*/
-				if (fetch_fail == 1000)
-				{
-					AM_DEBUG(1, "[timeshift] data break, eof, try:%d", len);
-					AM_EVT_Signal(tshift->dev->dev_no, AM_AV_EVT_PLAYER_EOF, NULL);
+					if (errno == EIO && is_playback_mode)
+					{
+						AM_DEBUG(1, "Disk may be plugged out, exit playback.");
+						break;
+					}
 				}
-				if (error == EIO && is_playback_mode)
-				{
-					AM_DEBUG(1, "Disk may be plugged out, exit playback.");
-					break;
-				}
-			}
+#ifdef SUPPORT_CAS
+			} 
+while (secure_enable && (tshift->left < len) && tshift->running);
+#endif
 		}
 
 		/*Inject*/
@@ -3291,16 +3416,59 @@ static void *aml_timeshift_thread(void *arg)
 					tshift->timeout = 0;
 				}
 			}
+#ifdef SUPPORT_CAS
 			ret = AM_MIN(tshift->left , tshift->inject_size);
-			if (ret > 0)
-				ret = aml_timeshift_inject(tshift, buf, ret, -1);
+			if (ret > 0 && secure_enable && tshift->para.para.dec_cb) {
+				//AM_TFile_CasDump();
+				offset = 0;
+				//offset %= SECURE_BLOCK_SIZE;
+				AM_DEBUG(0, "tshift cas dec. offset[%lld]", offset);
+				if (!offset) {
+					/*Last chunk inject completed,*/
+					memset(&cparam, 0, sizeof(cparam));
+					cparam.store_info.data = store_info;
+					cparam.rec_info.data = rec_info;
+					ret = AM_TFile_CasGetRecInfo(&cparam.rec_info);
+					pos = AM_TFile_Tell(tshift->file);
+					AM_DEBUG(0, "%s, get cas rec info:%d, blk_size:%d, left:%d, tell pos:%lld",
+							__func__, ret, cparam.rec_info.blk_size, tshift->left, pos);
+					ret = AM_TFile_CasGetStoreInfo(pos, &cparam.store_info);
+					if (ret == AM_SUCCESS) {
+						cparam.buf_in = buf;
+						cparam.buf_out = tshift->para.para.secure_buffer;
+						cparam.buf_len = tshift->left;
+						tshift->para.para.dec_cb(&cparam, tshift->para.para.cb_param);
+					} else {
+						AM_DEBUG(0, "%s get cas store info failed, ts_pos:%lld", __func__, pos);
+					}
+				}
+				AM_DEBUG(0, "need inject = %#x, inject_unit = %#x", tshift->left, tshift->inject_size);
+				while (tshift->left && tshift->running) {
+					ret = AM_MIN(tshift->left, tshift->inject_size);
+					build_drm_pkg(drm_pkt, cparam.buf_out + offset, ret);
+					ret = aml_timeshift_inject(tshift, drm_pkt, ret, -1);
+					if (!ret) {
+						AM_DEBUG(0, "%s, secure inject failed, offset:%d, remain:%d", __func__, offset, tshift->left);
+						continue;
+					}
+					offset += ret;
+					tshift->left -= ret;
+					AM_DEBUG(0, "cas injected = %#x, offset = %#x, left = %#x", ret, offset, tshift->left);
+				};
+			} else
+#endif
+                        {
+				ret = AM_MIN(tshift->left , tshift->inject_size);
+				if (ret > 0)
+					ret = aml_timeshift_inject(tshift, buf, ret, -1);
 
-			if (ret > 0)
-			{
-				/*ret bytes written*/
-				tshift->left -= ret;
-				if (tshift->left > 0)
-					memmove(buf, buf+ret, tshift->left);
+				if (ret > 0)
+				{
+					/*ret bytes written*/
+					tshift->left -= ret;
+					if (tshift->left > 0)
+						memmove(buf, buf+ret, tshift->left);
+				}
 			}
 		}
 

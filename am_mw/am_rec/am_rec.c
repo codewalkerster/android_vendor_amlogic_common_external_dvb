@@ -37,6 +37,9 @@
 #include <am_rec.h>
 #include "am_rec_internal.h"
 #include "am_misc.h"
+#ifdef SUPPORT_CAS
+#include <byteswap.h>
+#endif
 
 /****************************************************************************
  * Macro definitions
@@ -398,6 +401,53 @@ static int am_rec_data_write(AM_REC_Recorder_t *rec, uint8_t *buf, int size)
 	return (size - left);
 }
 
+#ifdef SUPPORT_CAS
+static int am_rec_save_cas_dat(AM_REC_Recorder_t *rec, AM_CAS_CryptPara_t *param)
+{
+	uint32_t block_size;
+	uint16_t info_len;
+	uint64_t pos;
+
+	AM_DEBUG(0, "%s, blk_size:%d, rec_info_len:%d, store_info_len:%d, pos:%lld\n", __func__, param->rec_info.blk_size,
+			param->rec_info.len, param->store_info.len, param->store_info.pos);
+	if (!rec->cas_dat_write) {
+		block_size = bswap_32(param->rec_info.blk_size);
+		if (write(rec->cas_dat_fd, &block_size, sizeof(block_size)) != sizeof(block_size)) {
+			AM_DEBUG(0, "%s save block size falied, %s", __func__, strerror(errno));
+			return -1;
+		}
+		info_len = bswap_16(param->rec_info.len);
+		if (write(rec->cas_dat_fd, &info_len, sizeof(info_len)) != sizeof(info_len)) {
+			AM_DEBUG(0, "%s save rec info len falied, %s", __func__, strerror(errno));
+			return -1;
+		}
+		if (write(rec->cas_dat_fd, param->rec_info.data, param->rec_info.len) != param->rec_info.len) {
+			AM_DEBUG(0, "%s save rec info data falied, %s", __func__, strerror(errno));
+			return -1;
+		}
+		AM_DEBUG(3, "%s save rec info success, blk_size:%d, info_len:%d\n", __func__, block_size, info_len);
+		rec->cas_dat_write = 1;
+	}
+
+	pos = bswap_64(param->store_info.pos);
+	if (write(rec->cas_dat_fd, &pos, sizeof(pos)) != sizeof(pos)) {
+		AM_DEBUG(0, "%s save store info pos falied, %s", __func__, strerror(errno));
+		return -1;
+	}
+	info_len = bswap_16(param->store_info.len);
+	if (write(rec->cas_dat_fd, &info_len, sizeof(info_len)) != sizeof(info_len)) {
+		AM_DEBUG(0, "%s save store info len falied, %s", __func__, strerror(errno));
+		return -1;
+	}
+	if (write(rec->cas_dat_fd, param->store_info.data, param->store_info.len) != param->store_info.len) {
+		AM_DEBUG(0, "%s save store info data falied, %s", __func__, strerror(errno));
+		return -1;
+	}
+	AM_DEBUG(3, "%s save store info success, pos:%lld, info_len:%d\n", __func__, pos, info_len);
+	return 0;
+}
+#endif
+
 /**\brief 录像线程*/
 static void *am_rec_record_thread(void* arg)
 {
@@ -410,6 +460,15 @@ static void *am_rec_record_thread(void* arg)
 	AM_REC_RecEndPara_t epara;
 	const int UPDATE_TIME_PERIOD = 1000;
 	const int stat_flag = rec->stat_flag;
+#ifdef SUPPORT_CAS
+	uint8_t sec_buf[32] = {0};
+	AM_Rec_SecureBlock_t sec_block = {0};
+	uint8_t *buf_in = NULL, *buf_out = NULL;
+	int size;
+	AM_CAS_CryptPara_t cpara;
+	static uint8_t cas_store_info[512] = {0};
+	static uint8_t cas_rec_info[16] = {0};
+#endif
 
 #define CRYPT_BUF_SIZE (256*1024)
 	uint8_t *crypt_buf;
@@ -475,7 +534,18 @@ static void *am_rec_record_thread(void* arg)
 			}
 		}
 		retry_count = 5;
+#ifdef SUPPORT_CAS
+		if (rec->create_para.is_smp && rec->rec_para.enc_cb) {
+			buf_in = &sec_block;
+			size = sizeof(sec_block);
+		} else {
+			buf_in = buf;
+			size = sizeof(buf);
+		}
+		cnt = AM_DVR_Read(rec->create_para.dvr_dev, buf_in, size, -1);
+#else
 		cnt = AM_DVR_Read(rec->create_para.dvr_dev, buf, sizeof(buf), 50);
+#endif
 		if (cnt <= 0)
 		{
 			while (retry_count--) {
@@ -490,6 +560,30 @@ static void *am_rec_record_thread(void* arg)
 			} else
 				break;
 		}
+
+#ifdef SUPPORT_CAS
+		if (rec->create_para.is_smp && rec->rec_para.enc_cb) {
+			memset(&cpara, 0, sizeof(cpara));
+			cpara.buf_in = (uint8_t *)sec_block.addr;
+			cpara.buf_out = buf;
+			cpara.buf_len = sec_block.len;
+			cpara.rec_info.data = cas_rec_info;
+			cpara.store_info.data = cas_store_info;
+			AM_DEBUG(1, "enc_cb %#x", rec->rec_para.cb_param);
+			rec->rec_para.enc_cb(&cpara, rec->rec_para.cb_param);
+			if (rec->rec_para.is_timeshift) {
+				if (cpara.store_info.len) {
+					AM_TFile_CasSetStoreInfo(cpara.store_info);
+				}
+			} else {
+				if (cpara.store_info.len) {
+					cpara.store_info.pos = lseek(rec->rec_fd, 0, SEEK_CUR);
+					am_rec_save_cas_dat(rec, &cpara);
+				}
+			}
+			cnt = sec_block.len;
+		}
+#endif
 
 		if (rec->stat_flag & REC_STAT_FL_PAUSED) {
 			/*drop left*/
@@ -566,6 +660,13 @@ static void *am_rec_record_thread(void* arg)
 					err = AM_REC_ERR_CANNOT_WRITE_FILE;
 					break;
 				}
+#ifdef SUPPORT_CAS
+				if (rec->create_para.is_smp && rec->rec_para.enc_cb)
+				{
+					//timeshfit write success, update start/end pos
+					AM_TFile_CasUpdateStoreInfo(ldata, rec->tfile->size);
+				}
+#endif
 			}
 			else
 			{
@@ -652,6 +753,11 @@ close_file:
 		epara.total_time = duration;
 		
 		AM_DEBUG(1, "Record end , duration %d:%02d:%02d", duration/3600, (duration%3600)/60, duration%60);
+#ifdef SUPPORT_CAS
+	} else {
+		if (rec->create_para.is_smp)
+			AM_TFile_CasClose();
+#endif
 	}
 
 	epara.error_code = err;
@@ -724,6 +830,19 @@ static int am_rec_start_record(AM_REC_Recorder_t *rec, AM_REC_RecPara_t *start_p
 
 	if (! rec->rec_para.is_timeshift)
 	{
+#ifdef SUPPORT_CAS
+	AM_DEBUG(1, "%s %d", __FUNC__, __LINE__);
+		if (rec->create_para.is_smp) {
+			rec->cas_dat_fd = open(rec->create_para.cas_dat_path, O_TRUNC|O_CREAT|O_WRONLY, 0666);
+			if (rec->cas_dat_fd == -1)
+			{
+				AM_DEBUG(1, "Cannot open record file '%s', cannot start", rec->create_para.cas_dat_path);
+				ret = AM_REC_ERR_CANNOT_OPEN_FILE;
+				goto start_end;
+			}
+		}
+	AM_DEBUG(1, "%s %d", __FUNC__, __LINE__);
+#endif
 		rec->rec_fd = open(rec->rec_file_name, O_TRUNC|O_CREAT|O_WRONLY, 0666);
 		if (rec->rec_fd == -1)
 		{
@@ -733,7 +852,11 @@ static int am_rec_start_record(AM_REC_Recorder_t *rec, AM_REC_RecPara_t *start_p
 		}
 
 		char buf[64];
+#ifdef SUPPORT_CAS
+		snprintf(buf, sizeof(buf), "%d", 256*1024);
+#else
 		snprintf(buf, sizeof(buf), "%d", 32*1024);
+#endif
 
 		AM_FileEcho(DVB_STB_ASYNCFIFO_FLUSHSIZE_FILE, buf);
 
@@ -750,6 +873,11 @@ static int am_rec_start_record(AM_REC_Recorder_t *rec, AM_REC_RecPara_t *start_p
 			goto start_end;
 		}
 		AM_DEBUG(1, "create Tfile %p", rec->tfile);
+#ifdef SUPPORT_CAS
+		if (rec->create_para.is_smp) {
+			AM_TFile_CasOpen(NULL);
+		}
+#endif
 	}
 
 	rec->rec_start_time = 0;

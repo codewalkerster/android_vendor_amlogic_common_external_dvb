@@ -93,6 +93,34 @@ struct AM_TFileData_s
 	int delete_on_close;
 };
 
+#ifdef SUPPORT_CAS
+//#define BUF_NORMAL 0
+//#define BUF_SECURE 1
+typedef struct
+{
+	uint32_t blk_size;
+	uint16_t len;
+	uint8_t *data;
+} CAS_RecInfo_t;
+typedef struct
+{
+	uint64_t pos;
+	uint16_t len;
+	uint8_t *data;
+} CAS_StoreInfo_t;
+typedef struct
+{
+	uint8_t 				*buf_in;
+	uint8_t					*buf_out;
+	uint32_t				buf_len;
+	uint32_t				buf_type;
+	CAS_RecInfo_t 	rec_info;
+	CAS_StoreInfo_t store_info;
+} AM_CAS_CryptPara_t;
+typedef int (*AM_CAS_decrypt) (AM_CAS_CryptPara_t *crypto_inf, uint32_t param);
+typedef int (*AM_CAS_encrypt) (AM_CAS_CryptPara_t *crypto_inf, uint32_t param);
+#endif
+
 /****************************************************************************
  * API function prototypes
  ***************************************************************************/
@@ -155,6 +183,25 @@ extern int AM_TFile_TimeGetEnd(AM_TFile_t tfile);
 
 extern loff_t AM_TFile_GetAvailable(AM_TFile_t tfile);
 
+#ifdef SUPPORT_CAS
+extern int AM_TFile_CasOpen(char *path);
+
+extern int AM_TFile_Close(AM_TFile_t tfile);
+
+extern int AM_TFile_CasOpen(char *path);
+
+extern int AM_TFile_CasClose();
+
+extern int AM_TFile_CasUpdateStoreInfo(uint32_t len, uint64_t fsize);
+
+extern int AM_TFile_CasSetStoreInfo(CAS_StoreInfo_t info);
+
+extern int AM_TFile_CasGetStoreInfo(uint64_t stream_pos, CAS_StoreInfo_t *info);
+
+extern int AM_TFile_CasGetRecInfo(CAS_RecInfo_t *info);
+
+extern int AM_TFile_CasDump();
+#endif
 #ifdef __cplusplus
 }
 #endif

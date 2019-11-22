@@ -184,6 +184,9 @@ else
 endif
 
 #LOCAL_32_BIT_ONLY := true
+ifeq ($(SUPPORT_CAS), y)
+LOCAL_CFLAGS+=-DSUPPORT_CAS
+endif
 
 include $(BUILD_SHARED_LIBRARY)
 
@@ -309,6 +312,9 @@ LOCAL_SRC_FILES := am_dmx/am_dmx.c am_dmx/linux_dvb/linux_dvb.c\
 LOCAL_CFLAGS+=-DANDROID -DAMLINUX -DCHIP_8226M -DLINUX_DVB_FEND -DLOG_LEVEL=1 -DNO_SYSFS
 ifeq ($(AMLOGIC_LIBPLAYER), y)
 LOCAL_CFLAGS+=-DAMLOGIC_LIBPLAYER
+endif
+ifeq ($(SUPPORT_CAS), y)
+LOCAL_CFLAGS+=-DSUPPORT_CAS
 endif
 LOCAL_CFLAGS+=-std=gnu99
 
@@ -649,6 +655,9 @@ LOCAL_C_INCLUDES += external/icu/icu4c/source/common
 LOCAL_SHARED_LIBRARIES+=$(AMADEC_LIBS) libicuuc libcutils liblog libdl libc
 endif
 
+ifeq ($(SUPPORT_CAS), y)
+LOCAL_CFLAGS+=-DSUPPORT_CAS
+endif
 LOCAL_PRELINK_MODULE := false
 
 LOCAL_PROPRIETARY_MODULE := true
