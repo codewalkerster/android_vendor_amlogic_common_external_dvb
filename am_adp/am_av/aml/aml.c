@@ -4561,10 +4561,10 @@ static AM_ErrorCode_t aml_start_ts_mode(AM_AV_Device_t *dev, AV_TSPlayPara_t *tp
 		}
 		AM_FileEcho(ENABLE_RESAMPLE_FILE, "1");
 
-		audio_ops->adec_start_decode(ts->fd, tp->afmt, has_video, &ts->adec);
-
 		if (VALID_PID(tp->sub_apid))
 			aml_set_audio_ad(dev, 1, tp->sub_apid, tp->sub_afmt);
+
+		audio_ops->adec_start_decode(ts->fd, tp->afmt, has_video, &ts->adec);
 	}
 //#endif /*ENABLE_PCR*/
 
