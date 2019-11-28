@@ -65,7 +65,7 @@ typedef enum {
 	H264_AFD_TYPE = 7,
 } userdata_type;
 
-
+#define IS_AFD_TYPE(p) ((p == MPEG_AFD_TYPE) || (p == H264_AFD_TYPE))
 typedef enum {
 	/* 0 forbidden */
 	I_TYPE = 1,
@@ -277,6 +277,7 @@ static userdata_type aml_check_userdata_format (uint8_t *buf, int vfmt, int len)
 	//0 for MPEG
 	//2 for H264
 	//7 for AVS
+
 	if (vfmt == 2)
 	{
 		if (IS_H264(buf))
@@ -323,6 +324,8 @@ static userdata_type aml_check_userdata_format (uint8_t *buf, int vfmt, int len)
 			}
 		}
 	}
+	else
+		AM_DEBUG(AM_DEBUG_LEVEL, "vfmt not handled");
 
 	return INVALID_TYPE;
 }
@@ -891,15 +894,19 @@ static void* aml_userdata_thread (void *arg)
 #if 0
 			for (i=0; i<left; i++)
 				sprintf(&display_buffer[i*3], " %02x", data[i]);
-			AM_DEBUG(0, "ud_aml_buffer: %s", display_buffer);
+			AM_DEBUG(0, "fmt %d ud_aml_buffer: %s", ud->vfmt, display_buffer);
 #endif
 			ud->format = INVALID_TYPE;
-			while (ud->format == INVALID_TYPE) {
+			while (ud->format == INVALID_TYPE ||
+							IS_AFD_TYPE(ud->format))
+			{
 				if (left < 8)
 					break;
 
 				ud->format = aml_check_userdata_format(pd, ud->vfmt, left);
-				if (ud->format == INVALID_TYPE) {
+				if (ud->format == INVALID_TYPE ||
+							IS_AFD_TYPE(ud->format))
+				{
 					pd   += 8;
 					left -= 8;
 				}
