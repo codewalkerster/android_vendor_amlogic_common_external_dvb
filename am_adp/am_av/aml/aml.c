@@ -806,6 +806,7 @@ static int get_amstream(AM_AV_Device_t *dev)
 #define AUD_ASSO_MIX_PROP "media.audio.mix_asso"
 #define VID_DISABLED_PROP "media.dvb.video.disabled"
 #define AUD_DISABLED_PROP "media.dvb.audio.disabled"
+#define TIMESHIFT_DBG_PROP "tv.dvb.tf.debug"
 
 static int _get_prop_int(char *prop, int def) {
 	char v[32];
@@ -853,6 +854,13 @@ static int _get_dvb_loglevel() {
 	return property_get_int32(DVB_LOGLEVEL_PROP, AM_DEBUG_LOGLEVEL_DEFAULT);
 #else
 	return 0;//AM_DEBUG_LOGLEVEL_DEFAULT;
+#endif
+}
+static int _get_timethift_dbg() {
+#ifdef ANDROID
+	return property_get_int32(TIMESHIFT_DBG_PROP, 0);
+#else
+	return 0;;
 #endif
 }
 static AM_ErrorCode_t adec_aout_open_cb(AM_AOUT_Device_t *dev, const AM_AOUT_OpenPara_t *para)
@@ -2456,7 +2464,6 @@ static AM_ErrorCode_t aml_start_timeshift(AV_TimeshiftData_t *tshift, AV_TimeShi
 	snprintf(buf, sizeof(buf), "%d", 32*1024);
 	AM_FileEcho(DVB_STB_ASYNCFIFO_FLUSHSIZE_FILE, buf);
 
-
 	if (check_vfmt_support_sched(tp->vfmt) == AM_FALSE)
 	{
 		AM_DEBUG(1, "Openning mpts");
@@ -3209,6 +3216,7 @@ static int build_drm_pkg(uint8_t *outpktdata, uint8_t *addr, uint32_t size)
 	return 0;
 }
 #endif
+
 /**\brief Timeshift 线程*/
 static void *aml_timeshift_thread(void *arg)
 {
@@ -3239,11 +3247,13 @@ static void *aml_timeshift_thread(void *arg)
 	int abuf_len = 0;
 	int skip_flag_count = 0;
 	int dmx_vpts = 0,  vpts = 0, last_vpts = 0;
+	int dmx_apts = 0,  apts = 0, last_apts = 0;
 	char pts_buf[32];
 	int diff = 0, last_diff = 0;
+	int adiff = 0, last_adiff = 0;
 	int error_cnt = 0;
-	int v_stuck = -1;
 	int fetch_fail = 0;
+	int debug_print = 0;
 
 	AV_TSPlayPara_t *tp = &tshift->tp;
 	AM_Bool_t has_video = VALID_VIDEO(tp->vpid, tp->vfmt);
@@ -3269,12 +3279,17 @@ static void *aml_timeshift_thread(void *arg)
 	tshift->dev->cryptor = aml_try_open_crypt(tshift->dev->crypt_ops);
 	AM_DEBUG(1, "[timeshift] crypt mode : %d", (tshift->dev->cryptor)? 1 : 0);
 
+	debug_print = _get_timethift_dbg();
+
 	while (tshift->running || tshift->cmd != tshift->last_cmd )
 	{
 		pthread_mutex_lock(&tshift->lock);
 		cmd = tshift->cmd;
 		speed = tshift->speed;
 		pthread_mutex_unlock(&tshift->lock);
+
+		/*check the audio, in case of audio switch*/
+		has_audio = VALID_AUDIO(tp->apid, tp->afmt);
 
 		if ((tshift->last_cmd == AV_PLAY_FF || tshift->last_cmd == AV_PLAY_FB)
 				&& (cmd == AV_PLAY_PAUSE || cmd == AV_PLAY_RESUME))
@@ -3299,9 +3314,6 @@ static void *aml_timeshift_thread(void *arg)
 		if (len > 0)
 		{
 			if (has_video) {
-				/*
-				 *	$ID: 100351, fixed timeshift switch subtitle too slow.
-				 */
 				if (AM_FileRead(VIDEO_DMX_PTS_FILE, pts_buf, sizeof(pts_buf)) >= 0) {
 					sscanf(pts_buf, "%d", &dmx_vpts);
 				} else {
@@ -3314,56 +3326,87 @@ static void *aml_timeshift_thread(void *arg)
 					AM_DEBUG(1, "cannot read \"%s\"", VIDEO_PTS_FILE);
 					vpts = 0;
 				}
+			}
 
-				if (tshift->state == AV_TIMESHIFT_STAT_PLAY) {
-					if (ioctl(tshift->ts.fd, AMSTREAM_IOC_VB_STATUS, (unsigned long)&vstatus) != -1) {
-						AM_DEBUG(4, "vstat_len:%d , file_avail:%lld", vstatus.status.data_len , tshift->file->avail);
-					} else {
+			if (has_audio) {
+				if (AM_FileRead(AUDIO_DMX_PTS_FILE, pts_buf, sizeof(pts_buf)) >= 0) {
+					sscanf(pts_buf, "%d", &dmx_apts);
+				} else {
+					AM_DEBUG(1, "cannot read \"%s\"", AUDIO_DMX_PTS_FILE);
+					dmx_apts = 0;
+				}
+				if (AM_FileRead(AUDIO_PTS_FILE, pts_buf, sizeof(pts_buf)) >= 0) {
+					sscanf(pts_buf+2, "%x", &apts);
+				} else {
+					AM_DEBUG(1, "cannot read \"%s\"", AUDIO_PTS_FILE);
+					apts = 0;
+				}
+			}
+
+
+			if (tshift->state == AV_TIMESHIFT_STAT_PLAY) {
+				if (has_video) {
+					if (ioctl(tshift->ts.fd, AMSTREAM_IOC_VB_STATUS, (unsigned long)&vstatus) != 0) {
 						AM_DEBUG(1,"get v_stat_len failed, %d(%s)", errno, strerror(errno));
 					}
+				}
 
-					/*treat little data as replay*/
-					if (vstatus.status.data_len < DEC_STOP_VIDEO_LEVEL)
-						v_stuck = -1;
-
-					if (last_vpts != vpts) {
-						if (v_stuck > 0)
-							v_stuck = 0;
-						last_vpts = vpts;
-					} else {
-						v_stuck++;
-					}
-					diff = (dmx_vpts - vpts)/90000;
-
-					//AM_DEBUG(3, "#### vpts:%#x, dmx_vpts:%#x, diff:%d, %s, %s, play_stat:%d vdata_len:0x%x\n",
-					// vpts, dmx_vpts, diff, diff>TIMESHIFT_INJECT_DIFF_TIME?"large":"small", (diff==last_diff)?"equal":"not equal", tshift->state, vstatus.status.data_len);
-
-					/*prevent the data sink into buffer all, which causes sub/txt lost*/
-					if (
-						/*pts discontinue*/
-						vpts != 0 && dmx_vpts != 0 && diff > TIMESHIFT_INJECT_DIFF_TIME
-						/*data ready, (not exact)*/
-						&& vstatus.status.data_len > DEC_STOP_VIDEO_LEVEL
-						/*bypass inject, only if !(stuck || firstrun)*/
-						&& (v_stuck >= 0 && v_stuck < 3)
-					)
-					{
-						AM_DEBUG(5, "[timeshift] bypass inject: vpts:%#x, dmx_vpts:%#x, diff:%d, %s, %s, play_stat:%d vdata_len:0x%x\n",
-							vpts, dmx_vpts,
-							diff,
-							diff>TIMESHIFT_INJECT_DIFF_TIME?"large":"small",
-							(diff==last_diff)?"equal":"not equal",
-							tshift->state,
-							vstatus.status.data_len);
-
-						last_diff = diff;
-						tshift->timeout = 10;
-						goto wait_for_next_loop;
+				if (has_audio) {
+					if (ioctl(tshift->ts.fd, AMSTREAM_IOC_AB_STATUS, (unsigned long)&astatus) != 0) {
+						AM_DEBUG(1,"get a_stat_len failed, %d(%s)", errno, strerror(errno));
 					}
 				}
-				/*
-				 *	## end of 100351
-				 */
+
+				int wait_next = 0;
+
+				if (vpts > dmx_vpts) {
+					diff = 0;
+				} else {
+					diff = (dmx_vpts - vpts)/90000;
+				}
+
+				if (apts > dmx_apts) {
+					adiff = 0;
+				} else {
+					adiff = (dmx_apts - apts)/90000;
+				}
+
+
+				/*fixme: may need more condition according to fmt*/
+				#define IS_ALEVEL_OK(_data_len, _afmt) ((_data_len) > 768)
+				#define IS_ADUR_OK(_adiff, _afmt)      ((_adiff) > TIMESHIFT_INJECT_DIFF_TIME)
+				#define IS_ADATA_OK(_data_len, _adiff, _afmt)  (IS_ALEVEL_OK(_data_len, _afmt) || IS_ADUR_OK(_adiff, _afmt))
+
+				#define IS_VLEVEL_OK(_data_len, _vfmt) ((_data_len) > DEC_STOP_VIDEO_LEVEL)
+				#define IS_VDUR_OK(_vdiff, _vfmt)      ((_vdiff) > TIMESHIFT_INJECT_DIFF_TIME)
+				#define IS_VDATA_OK(_data_len, _vdiff, _vfmt)  (IS_VLEVEL_OK(_data_len, _vfmt) && IS_VDUR_OK(_vdiff, _vfmt))
+
+				/*prevent the data sink into buffer all, which causes sub/txt lost*/
+				if (
+					(has_video ? IS_VDATA_OK(vstatus.status.data_len, diff, tp->vfmt) : AM_TRUE)
+					&& (has_audio ? IS_ADATA_OK(astatus.status.data_len, adiff, tp->afmt) : AM_TRUE)
+					/*none? just inject*/
+					&& (has_audio || has_video)
+				)
+					wait_next = 1;
+				else
+					wait_next = 0;
+
+				if (debug_print) {
+					AM_DEBUG(1, ">> wait_next[%d] a/v[%d:%d] lvl[0x%x:0x%x] vpts/vdmx/diff[%#x:%#x:%d], apts/admx/diff[%#x:%#x:%d]\n",
+						wait_next,
+						has_audio, has_video,
+						astatus.status.data_len, vstatus.status.data_len,
+						vpts, dmx_vpts, diff,
+						apts, dmx_apts, adiff);
+				}
+
+				if (wait_next) {
+					last_diff = diff;
+					last_adiff = adiff;
+					tshift->timeout = 10;
+					goto wait_for_next_loop;
+				}
 			}
 #ifdef SUPPORT_CAS
                         if (secure_enable && AM_TFile_Tell(tshift->file) == 0 && is_playback_mode) {
@@ -4777,14 +4820,7 @@ static void* aml_av_monitor_thread(void *arg)
 			AM_DEBUG(1,"[aml_av_monitor_thread] ending");
 			break;
 		}
-		has_audio = VALID_AUDIO(tp->apid, tp->afmt);
-		has_video = VALID_VIDEO(tp->vpid, tp->vfmt);
-		if ((!has_audio) && (!has_video)) {
-			AM_DEBUG(1,"Audio && Video is None");
-			continue;
-		} else {
-			//AM_DEBUG(1,"Audio:%d or Video:%d is Running.",has_audio,has_video);
-			}
+
 		if (is_dts_dolby == 1) {
 			if (mChange_audio_flag == -1) {
 				mChange_audio_flag = aml_get_audio_digital_raw();
@@ -4799,6 +4835,15 @@ static void* aml_av_monitor_thread(void *arg)
 			aml_switch_ts_audio_fmt(dev, ts, tp);
 			dev->audio_switch = AM_FALSE;
 			adec_start = (adec_handle != NULL);
+		}
+
+		has_audio = VALID_AUDIO(tp->apid, tp->afmt);
+		has_video = VALID_VIDEO(tp->vpid, tp->vfmt);
+		if ((!has_audio) && (!has_video)) {
+			AM_DEBUG(1,"Audio && Video is None");
+			continue;
+		} else {
+			//AM_DEBUG(1,"Audio:%d or Video:%d is Running.",has_audio,has_video);
 		}
 
 		AM_TIME_GetClock(&now);
@@ -5470,12 +5515,12 @@ static void* aml_av_monitor_thread(void *arg)
 
 		if (has_audio && (apts - dmx_apts) > TIME_UNIT90K*2) {
 			apts_discontinue = 1;
-			AM_DEBUG(1, "[avmon] dmx_apts:%d,apts:%d",dmx_apts,apts);
+			AM_DEBUG(1, "[avmon] dmx_apts:0x%x,apts:0x%x",dmx_apts,apts);
 		}
 
 		if (has_video && (vpts - dmx_vpts) > TIME_UNIT90K*2) {
 			vpts_discontinue = 1;
-			AM_DEBUG(1, "[avmon] dmx_vpts:%d,vpts:%d",dmx_vpts,vpts);
+			AM_DEBUG(1, "[avmon] dmx_vpts:0x%x,vpts:0x%x",dmx_vpts,vpts);
 		}
 
 		if (AM_FileRead(TSYNC_PCR_MODE_FILE, buf, sizeof(buf)) >= 0) {
