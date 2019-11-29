@@ -76,13 +76,17 @@ void prepare_file(){
 		return ;
 
 	strncat(name, "/pes", 255);
+	AM_DEBUG(1, "try file open:[%s]\n", name);
 	fp = fopen(name, "wb");
-	printf("file open:[%s] [fp:%p]\n", name, fp);
-
+	if (!fp) {
+		AM_DEBUG(1, "file open:[%s] error\n", name);
+	}
 	strncat(name, ".es", 255);
+	AM_DEBUG(1, "try file open:[%s]\n", name);
 	fp_e = fopen(name, "wb");
-	printf("file open:[%s] [fp:%p]\n", name, fp_e);
-
+	if (!fp_e) {
+		AM_DEBUG(1, "file open:[%s] error\n", name);
+	}
 	signal(SIGINT, sigroutine);
 }
 
@@ -99,9 +103,10 @@ static void pes_packet_callback(AM_PES_Handle_t handle, uint8_t *buf, int size)
 	//printf("es cb b=%p, s:%d\n", buf, size);
 
 	if (fp_e) {
+		AM_DEBUG(1, "write es data");
 		int ret = fwrite(buf, 1, size, fp_e);
 		if (ret != size)
-			printf("data w lost\n");
+			AM_DEBUG(1, "es data w lost\n");
 	}
 
 	if (ad->cb)
@@ -116,14 +121,15 @@ static void ad_callback (int dev_no, int fhandle, const uint8_t *data, int len, 
 	UNUSED(fhandle);
 	UNUSED(data);
 
-	AM_DEBUG(1, "ad data %d", len);
+	AM_DEBUG(2, "ad data %d", len);
 	//printf("[%d] %02x %02x %02x %02x %02x %02x %02x %02x %02x\n", len,
 	//	data[0], data[1], data[2], data[3], data[4], data[5], data[6], data[7], data[8]);
 
 	if (fp) {
+		AM_DEBUG(1, "write pes data");
 		int ret = fwrite(data, 1, len, fp);
 		if (ret != len)
-			printf("data w lost\n");
+			AM_DEBUG(1, "pes data w lost\n");
 	}
 
 	AM_PES_Decode(ad->h_pes, (uint8_t *)data, len);
@@ -166,7 +172,7 @@ AM_AD_Create(AM_AD_Handle_t *handle, AM_AD_Para_t *para)
 	pes.pid = para->pid;
 	pes.input = DMX_IN_FRONTEND;
 	pes.output = DMX_OUT_TAP;
-	pes.pes_type = DMX_PES_OTHER;
+	pes.pes_type = DMX_PES_AUDIO3;
 
 	ret = AM_DMX_AllocateFilter(para->dmx_id, &ad->filter);
 	if (ret != AM_SUCCESS)
@@ -190,7 +196,7 @@ AM_AD_Create(AM_AD_Handle_t *handle, AM_AD_Para_t *para)
 
 	prepare_file();
 
-	AM_DEBUG(1, "AM_AD_Create dmx[%d], pid[%d]", para->dmx_id, para->pid);
+	AM_DEBUG(1, "audio3 AM_AD_Create dmx[%d], pid[%d] DMX_PES_AUDIO3:[%d]", para->dmx_id, para->pid, DMX_PES_AUDIO3);
 
 	*handle = (AM_AD_Handle_t)ad;
 	return AM_SUCCESS;
