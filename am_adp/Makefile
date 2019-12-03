@@ -58,6 +58,8 @@ $(OUTPUT) : $(OBJS)
 
 install:
 	-install -m 555 ${OUTPUT} $(TARGET_DIR)/usr/lib/
+	-mkdir -p $(STAGING_DIR)/usr/include/aml_dvb
+	-cp -ar $(LOCAL_PATH)/../include/am_adp $(STAGING_DIR)/usr/include/aml_dvb
 
 clean:
 	@rm -f $(OBJS)
