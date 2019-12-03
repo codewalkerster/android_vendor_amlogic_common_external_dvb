@@ -5932,8 +5932,8 @@ static AM_ErrorCode_t aml_start_mode(AM_AV_Device_t *dev, AV_PlayMode_t mode, vo
 			inj_p = (AV_InjectPlayPara_t *)para;
 			inj = dev->inject_player.drv_data;
 			inj_p->drm_mode = dev->curr_para.drm_mode;
-			dev->alt_apid = inj->aud_id;
-			dev->alt_afmt = inj->aud_fmt;
+			dev->alt_apid = inj_p->para.aud_id;
+			dev->alt_afmt = inj_p->para.aud_fmt;
 			if (aml_start_inject(dev, inj, inj_p) != AM_SUCCESS)
 			{
 				AM_DEBUG(1,"[aml_start_mode]  AM_AV_ERR_SYS");
