@@ -5825,7 +5825,7 @@ static AM_ErrorCode_t aml_start_mode(AM_AV_Device_t *dev, AV_PlayMode_t mode, vo
 	AV_FilePlayPara_t *pp;
 #endif
 	// AV_JPEGData_t *jpeg;
-	AV_InjectPlayPara_t *inj_p;
+	AV_InjectPlayPara_t inj_p;
 	AV_InjectData_t *inj;
 	AV_TimeShiftPlayPara_t *tshift_p;
 	AV_TimeshiftData_t *tshift;
@@ -5929,12 +5929,12 @@ static AM_ErrorCode_t aml_start_mode(AM_AV_Device_t *dev, AV_PlayMode_t mode, vo
 		// 	return aml_decode_jpeg(jpeg, dev->vid_player.para.data, dev->vid_player.para.len, mode, para);
 		// break;
 		case AV_INJECT:
-			inj_p = (AV_InjectPlayPara_t *)para;
+			memcpy(&inj_p, para, sizeof(AM_AV_InjectPara_t));
 			inj = dev->inject_player.drv_data;
-			inj_p->drm_mode = dev->curr_para.drm_mode;
-			dev->alt_apid = inj_p->para.aud_id;
-			dev->alt_afmt = inj_p->para.aud_fmt;
-			if (aml_start_inject(dev, inj, inj_p) != AM_SUCCESS)
+			inj_p.drm_mode = dev->curr_para.drm_mode;
+			dev->alt_apid = inj_p.para.aud_id;
+			dev->alt_afmt = inj_p.para.aud_fmt;
+			if (aml_start_inject(dev, inj, &inj_p) != AM_SUCCESS)
 			{
 				AM_DEBUG(1,"[aml_start_mode]  AM_AV_ERR_SYS");
 				return AM_AV_ERR_SYS;
