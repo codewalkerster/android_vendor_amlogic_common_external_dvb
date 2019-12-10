@@ -143,6 +143,7 @@ extern AM_ErrorCode_t AM_FEND_Open(int dev_no, const AM_FEND_OpenPara_t *para);
  *   - AM_SUCCESS On success
  *   - or error code
  */
+extern AM_ErrorCode_t AM_FEND_OpenEx(int dev_no, const AM_FEND_OpenPara_t *para, int *fe_fd);
 extern AM_ErrorCode_t AM_FEND_Close(int dev_no);
 extern AM_ErrorCode_t AM_FEND_CloseEx(int dev_no, AM_Bool_t reset);
 

@@ -656,6 +656,82 @@ AM_ErrorCode_t AM_FEND_Close(int dev_no)
 	return AM_FEND_CloseEx(dev_no, AM_TRUE);
 }
 
+
+/**\brief 关闭一个DVB前端设备
+ * \param dev_no 前端设备号
+ * \param fe_fd  前端设备文件描述号
+ * \return
+ *   - AM_SUCCESS 成功
+ *   - 其他值 错误代码(见am_fend.h)
+ */
+AM_ErrorCode_t AM_FEND_OpenEx(int dev_no, const AM_FEND_OpenPara_t *para, int *fe_fd)
+{
+	AM_FEND_Device_t *dev;
+	AM_ErrorCode_t ret = AM_SUCCESS;
+	int rc;
+
+	AM_TRY(fend_get_dev(dev_no, &dev));
+
+	pthread_mutex_lock(&am_gAdpLock);
+
+	if (dev->open_count > 0)
+	{
+		AM_DEBUG(1, "frontend device %d has already been openned", dev_no);
+		dev->open_count++;
+		ret = AM_SUCCESS;
+		goto final;
+	}
+
+	if (dev->drv->open)
+	{
+		AM_TRY_FINAL(dev->drv->open(dev, para));
+	}
+
+	pthread_mutex_init(&dev->lock, NULL);
+	pthread_cond_init(&dev->cond, NULL);
+
+	dev->dev_no = dev_no;
+	dev->open_count = 1;
+	dev->enable_thread = AM_TRUE;
+	dev->flags = 0;
+	dev->enable_cb = AM_TRUE;
+	dev->curr_mode = para->mode;
+
+	rc = pthread_create(&dev->thread, NULL, fend_thread, dev);
+	if (rc)
+	{
+		AM_DEBUG(1, "%s", strerror(rc));
+
+		if (dev->drv->close)
+		{
+			dev->drv->close(dev);
+		}
+		pthread_mutex_destroy(&dev->lock);
+		pthread_cond_destroy(&dev->cond);
+		dev->open_count = 0;
+
+		ret = AM_FEND_ERR_CANNOT_CREATE_THREAD;
+		goto final;
+	}
+	*fe_fd = (long)dev->drv_data;
+
+	{
+		struct sigaction actions;
+		memset(&actions, 0, sizeof(actions));
+		sigemptyset(&actions.sa_mask);
+		actions.sa_flags = 0;
+		actions.sa_handler = sighand;
+		rc = sigaction(SIGALRM, &actions, NULL);
+		if (rc != 0)
+			AM_DEBUG(1, "sigaction: err=%d", errno);
+	}
+final:
+	pthread_mutex_unlock(&am_gAdpLock);
+
+	return ret;
+}
+
+
 /**\brief 设定前端解调模式
  * \param dev_no 前端设备号
  * \param mode 解调模式
