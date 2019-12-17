@@ -41,6 +41,7 @@
 #include <cutils/properties.h>
 #endif
 #include "am_ad.h"
+#include "am_queue.h"
 
 #ifdef SUPPORT_CAS
 #include "aml_drm.h"
@@ -335,6 +336,7 @@ extern int audio_decode_set_volume(void *, float);
 #define ROUNDUP(v, size) (((v) + ((__typeof__(v))(size) - 1)) & \
 													~((__typeof__(v))(size) - 1))
 #endif
+
 /****************************************************************************
  * Type definitions
  ***************************************************************************/
@@ -423,10 +425,25 @@ typedef enum
 	AV_TIMESHIFT_STAT_SEARCHOK,
 } AV_TimeshiftState_t;
 
+typedef struct {
+	AV_PlayCmd_t cmd;
+	int done;
+	union {
+		struct {
+			int seek_pos;
+		} seek;
+		struct {
+			int speed;
+		} speed;
+	};
+} AV_PlayCmdPara_t;
+
+#define TIMESHIFT_CMD_Q_SIZE (32)
+QUEUE_DECLARATION(timeshift_cmd_q, AV_PlayCmdPara_t, TIMESHIFT_CMD_Q_SIZE);
+
 /**\brief Timeshift播放模式相关数据*/
 typedef struct
 {
-	int					speed;
 	int					running;
 	int					rate;	/**< bytes/s*/
 	int					duration;	/**< dur for playback, ms*/
@@ -437,11 +454,10 @@ typedef struct
 	int					left;
 	int					inject_size;
 	int					timeout;
-	int					seek_pos;/**< ms*/
 	loff_t				rtotal;
 	int					rtime;
-	AV_PlayCmd_t		cmd;
-	AV_PlayCmd_t		last_cmd;
+	struct timeshift_cmd_q  cmd_q;
+	AV_PlayCmdPara_t        last_cmd[2];
 	pthread_t			thread;
 	pthread_mutex_t		lock;
 	pthread_cond_t		cond;
@@ -2376,6 +2392,76 @@ void aml_term_signal_handler(int signo)
 	}
 }
 
+static char *cmd2string(int cmd)
+{
+	char buf[64];
+	char *string_cmd[] = {
+	"play_start",        /*AV_PLAY_START*/
+	"play_pause",        /*AV_PLAY_PAUSE*/
+	"play_resume",       /*AV_PLAY_RESUME*/
+	"play_ff",           /*AV_PLAY_FF*/
+	"play_fb",           /*AV_PLAY_FB*/
+	"play_seek",         /*AV_PLAY_SEEK*/
+	"play_reset_vpath",  /*AV_PLAY_RESET_VPATH*/
+	"play_switch_audio"  /*AV_PLAY_SWITCH_AUDIO*/
+	};
+	if (cmd < 0 || cmd > AV_PLAY_SWITCH_AUDIO) {
+		sprintf(buf, "invalid cmd[%d]", cmd);
+		return buf;
+	}
+	return string_cmd[cmd];
+}
+
+
+QUEUE_DEFINITION(timeshift_cmd_q, AV_PlayCmdPara_t);
+
+static void timeshift_cmd_init(AV_PlayCmdPara_t *cmd, int c)
+{
+	cmd->cmd = c;
+	cmd->done = 0;
+}
+static int timeshift_cmd_diff(AV_PlayCmdPara_t *cmd1, AV_PlayCmdPara_t *cmd2)
+{
+	if (cmd1->cmd != cmd2->cmd)
+		return 1;
+	else if ((cmd1->cmd == AV_PLAY_FF) || (cmd1->cmd == AV_PLAY_FB))
+		return (cmd1->speed.speed != cmd2->speed.speed) ? 1 : 0;
+	else if (cmd1->cmd == AV_PLAY_SEEK)
+		return (cmd1->seek.seek_pos != cmd2->seek.seek_pos) ? 1 : 0;
+	return 0;
+}
+static int timeshift_cmd_put(AV_TimeshiftData_t *tshift, AV_PlayCmdPara_t *cmd)
+{
+	AV_PlayCmdPara_t last;
+	enum enqueue_result e_ret;
+	enum dequeue_result d_ret = timeshift_cmd_q_dequeue(&tshift->cmd_q, &last);
+
+	if (d_ret == DEQUEUE_RESULT_EMPTY)
+		e_ret = timeshift_cmd_q_enqueue(&tshift->cmd_q, cmd);
+	else if (last.cmd == cmd->cmd) {
+		e_ret = timeshift_cmd_q_enqueue(&tshift->cmd_q, cmd);
+	} else {
+		e_ret = timeshift_cmd_q_enqueue(&tshift->cmd_q, &last);
+		e_ret |= timeshift_cmd_q_enqueue(&tshift->cmd_q, cmd);
+	}
+	if (e_ret != ENQUEUE_RESULT_SUCCESS) {
+		AM_DEBUG(1, "[timeshift] warning: cmd lost, max:%d", TIMESHIFT_CMD_Q_SIZE);
+		return -1;
+	}
+	return 0;
+}
+static int timeshift_cmd_get(AV_TimeshiftData_t *tshift, AV_PlayCmdPara_t *cmd)
+{
+	if (timeshift_cmd_q_is_empty(&tshift->cmd_q))
+		return -1;
+	if (timeshift_cmd_q_dequeue(&tshift->cmd_q, cmd) != DEQUEUE_RESULT_SUCCESS)
+		return -1;
+	return 0;
+}
+static int timeshift_cmd_more(AV_TimeshiftData_t *tshift)
+{
+	return !timeshift_cmd_q_is_empty(&tshift->cmd_q);
+}
 
 /**\brief 创建Timeshift相关数据*/
 static AV_TimeshiftData_t* aml_create_timeshift_data(void)
@@ -2389,6 +2475,7 @@ static AV_TimeshiftData_t* aml_create_timeshift_data(void)
 	memset(tshift, 0, sizeof(AV_TimeshiftData_t));
 	tshift->ts.fd = -1;
 	tshift->ts.vid_fd = -1;
+	timeshift_cmd_q_init(&tshift->cmd_q);
 #ifdef SUPPORT_CAS
 	tshift->buf = malloc(SECURE_BLOCK_SIZE);
 	if (!tshift->buf) {
@@ -2482,27 +2569,49 @@ static void aml_timeshift_get_current(AV_TimeshiftData_t *tshift, int *current, 
 		*end = (timeshift)? AM_TFile_TimeGetEnd(tshift->file) : tshift->duration;
 }
 
-static void aml_timeshift_update_current(AV_TimeshiftData_t *tshift, AM_AV_TimeshiftInfo_t *info)
+/*track current status internally*/
+static void aml_timeshift_update_current(AV_TimeshiftData_t *tshift)
 {
 	aml_timeshift_get_current(tshift, &tshift->current, &tshift->start, &tshift->end);
+	AM_DEBUG(5, "[timeshift] update: state[%d] start[%d] current[%d] end[%d]", tshift->state, tshift->start, tshift->current, tshift->end);
+}
+
+/*update from internal status*/
+static void aml_timeshift_update(AV_TimeshiftData_t *tshift, AM_AV_TimeshiftInfo_t *info)
+{
 	info->current_time = tshift->current;
 	info->full_time = tshift->end;
-	AM_DEBUG(1, "[timeshift] update: status[%d] start[%d] current[%d] end[%d]", info->status, tshift->start, tshift->current, tshift->end);
+	info->status = tshift->state;
 }
 
-static void aml_timeshift_notify(AV_TimeshiftData_t *tshift, AM_AV_TimeshiftInfo_t *info)
+/*notification current status*/
+static void aml_timeshift_notify(AV_TimeshiftData_t *tshift, AM_AV_TimeshiftInfo_t *info, AM_Bool_t calc_delay)
 {
-	AM_DEBUG(1, "[timeshift] notify: status[%d] current[%d] full[%d]", info->status, info->current_time, info->full_time);
+	AM_AV_TimeshiftInfo_t inf;
+	AM_Bool_t has_video = VALID_VIDEO(tshift->tp.vpid, tshift->tp.vfmt);
+	int vdelay = 0, adelay = 0, delay = 0;
+
+	if (!info) {
+		info = &inf;
+		aml_timeshift_update(tshift, info);
+	}
+
+	if (has_video) {
+		if (ioctl(tshift->ts.fd, AMSTREAM_IOC_GET_VIDEO_CUR_DELAY_MS, &vdelay) != -1)
+			delay = vdelay;
+	} else {
+		if (ioctl(tshift->ts.fd, AMSTREAM_IOC_GET_AUDIO_CUR_DELAY_MS, &adelay) != -1)
+			delay = adelay;
+	}
+
+	if (calc_delay)
+		info->current_time -= delay;
+
+	AM_DEBUG(1, "[timeshift] notify: status[%d] current[%d] full[%d] -delay[%d:%d:%d]",
+		info->status, info->current_time, info->full_time, vdelay, adelay, delay);
 
 	AM_EVT_Signal(0, AM_AV_EVT_PLAYER_UPDATE_INFO, (void*)info);
-
 	aml_timeshift_update_info(tshift, info);
-}
-
-static void aml_timeshift_update_notify(AV_TimeshiftData_t *tshift, AM_AV_TimeshiftInfo_t *info)
-{
-	aml_timeshift_update_current(tshift, info);
-	aml_timeshift_notify(tshift, info);
 }
 
 /**\brief 设置Timeshift参数*/
@@ -2755,7 +2864,6 @@ static AM_ErrorCode_t aml_start_timeshift(AV_TimeshiftData_t *tshift, AV_TimeShi
 	if (create_thread)
 	{
 		tshift->state = AV_TIMESHIFT_STAT_STOP;
-		tshift->speed = 0;
 		tshift->duration = para->media_info.duration * 1000;
 
 		AM_DEBUG(1, "[timeshift] mode %d, duration %d", para->mode, tshift->duration);
@@ -2781,7 +2889,6 @@ static AM_ErrorCode_t aml_start_timeshift(AV_TimeshiftData_t *tshift, AV_TimeShi
 			}
 		} else {
 			tshift->file = tshift_para->para.tfile;
-			tshift->offset = tshift_para->para.offset_ms;
 			tshift->file_flag |= TIMESHIFT_TFILE_DETACHED;
 			AM_EVT_Subscribe((long)tshift->file, AM_TFILE_EVT_RATE_CHANGED, tfile_evt_callback, tshift->dev);
 			AM_DEBUG(1, "[timeshift] using TFile %p", tshift->file);
@@ -2793,16 +2900,14 @@ static AM_ErrorCode_t aml_start_timeshift(AV_TimeshiftData_t *tshift, AV_TimeShi
 			AM_DEBUG(1, "[timeshift] Playback file size %lld, duration %d ms, the bitrate is %d bps", tshift->file->size, tshift->duration, tshift->rate);
 		}
 		tshift->running = 1;
+		tshift->offset = tshift_para->para.offset_ms;
+		tshift->para = *tshift_para;
+		pthread_mutex_init(&tshift->lock, NULL);
+		pthread_cond_init(&tshift->cond, NULL);
 		if (pthread_create(&tshift->thread, NULL, aml_timeshift_thread, (void*)tshift))
 		{
 			AM_DEBUG(1, "create the timeshift thread failed");
 			tshift->running = 0;
-		}
-		else
-		{
-			tshift->para = *tshift_para;
-			pthread_mutex_init(&tshift->lock, NULL);
-			pthread_cond_init(&tshift->cond, NULL);
 		}
 		AM_DEBUG(1, "[timeshift] create aml_term_signal_handler");
 		signal(SIGTERM, &aml_term_signal_handler);
@@ -2859,6 +2964,8 @@ static void aml_check_audio_state(void)
 		}
 	}
 }
+
+
 
 static void aml_stop_timeshift(AV_TimeshiftData_t *tshift, AM_Bool_t destroy_thread)
 {
@@ -2958,15 +3065,12 @@ static int am_timeshift_playback_time_check(AV_TimeshiftData_t *tshift, int time
 	return time;
 }
 
-static int am_timeshift_fffb(AV_TimeshiftData_t *tshift)
+static int am_timeshift_fffb(AV_TimeshiftData_t *tshift, AV_PlayCmdPara_t *cmd)
 {
 	int now, ret, next_time;
-	int speed = tshift->speed;
+	int speed = cmd->speed.speed;
 
-	if (speed == 1)
-		speed = 0;
-
-	if (speed)
+	if (1/*speed*/)
 	{
 		if (tshift->para.para.mode == AM_AV_TIMESHIFT_MODE_TIMESHIFTING) {
 			next_time = AM_TFile_TimeGetReadNow(tshift->file) + speed * 2000;
@@ -2995,15 +3099,6 @@ static int am_timeshift_fffb(AV_TimeshiftData_t *tshift)
 		/*speed is 0/1, turn to play*/
 		ret = 1;
 		AM_DEBUG(1, "[timeshift] speed == [%d]", speed);
-	}
-
-	// do nothing
-	if (0/*ret*/)
-	{
-		/*FF FB reach end or speed is 0, so after this loop, we will turn to PLAY*/
-		pthread_mutex_lock(&tshift->lock);
-		tshift->cmd = AV_PLAY_START;
-		pthread_mutex_unlock(&tshift->lock);
 	}
 
 	return 0;
@@ -3047,18 +3142,18 @@ static int aml_timeshift_resume_av(AV_TimeshiftData_t *tshift)
 	return 0;
 }
 
-static int aml_timeshift_do_cmd_start(AV_TimeshiftData_t *tshift, AM_AV_TimeshiftInfo_t *info)
+static int aml_timeshift_do_cmd_start(AV_TimeshiftData_t *tshift)
 {
 	loff_t offset;
 
 	tshift->inject_size = 64*1024;
 	tshift->timeout = 0;
 	tshift->state = AV_TIMESHIFT_STAT_PLAY;
-	AM_DEBUG(1, "[timeshift] [start] seek to time %d s...", info->current_time);
+	AM_DEBUG(1, "[timeshift] [start] seek to time %d s...", tshift->current);
 	if (tshift->para.para.mode == AM_AV_TIMESHIFT_MODE_TIMESHIFTING) {
-		AM_TFile_TimeSeek(tshift->file, info->current_time);
+		AM_TFile_TimeSeek(tshift->file, tshift->current);
 	} else {//rec play
-		offset = (loff_t)info->current_time / 1000 * (loff_t)tshift->rate;
+		offset = (loff_t)tshift->current / 1000 * (loff_t)tshift->rate;
 		AM_TFile_Seek(tshift->file, offset);
 	}
 	if (VALID_VIDEO(tshift->tp.vpid, tshift->tp.vfmt))
@@ -3075,26 +3170,28 @@ static int aml_timeshift_do_cmd_start(AV_TimeshiftData_t *tshift, AM_AV_Timeshif
 	return 0;
 }
 
-static int aml_timeshift_do_play_cmd(AV_TimeshiftData_t *tshift, AV_PlayCmd_t cmd, AM_AV_TimeshiftInfo_t *info)
+static int aml_timeshift_do_play_cmd(AV_TimeshiftData_t *tshift, AV_PlayCmdPara_t *cmd)
 {
 	AV_TimeshiftState_t	last_state = tshift->state;
 	loff_t offset;
 	int state_changed = 0, cmd_changed = 0;
 
 	if ((tshift->para.para.mode != AM_AV_TIMESHIFT_MODE_TIMESHIFTING && !tshift->rate)
-        && (cmd == AV_PLAY_FF || cmd == AV_PLAY_FB || cmd == AV_PLAY_SEEK))
+		&& (cmd->cmd == AV_PLAY_FF || cmd->cmd == AV_PLAY_FB || cmd->cmd == AV_PLAY_SEEK))
 	{
 		AM_DEBUG(1, "zzz [timeshift] Have not got the rate, skip this command");
 		return -1;
 	}
 
-	if (tshift->last_cmd != cmd)
+	if ((tshift->last_cmd[0].cmd == AV_PLAY_SEEK && tshift->last_cmd[0].done)
+		|| timeshift_cmd_diff(&tshift->last_cmd[0], cmd))
 	{
-		switch (cmd)
+		switch (cmd->cmd)
 		{
 		case AV_PLAY_START:
 			//if (tshift->state != AV_TIMESHIFT_STAT_PLAY) {
-				aml_timeshift_do_cmd_start(tshift, info);
+				aml_timeshift_do_cmd_start(tshift);
+				aml_timeshift_update_current(tshift);
 			//}
 			break;
 		case AV_PLAY_PAUSE:
@@ -3107,6 +3204,7 @@ static int aml_timeshift_do_play_cmd(AV_TimeshiftData_t *tshift, AV_PlayCmd_t cm
 				if (VALID_VIDEO(tshift->tp.vpid, tshift->tp.vfmt))
 					ioctl(tshift->ts.vid_fd, AMSTREAM_IOC_TRICKMODE, TRICKMODE_NONE);
 				aml_timeshift_pause_av(tshift);
+				aml_timeshift_update_current(tshift);
 				AM_DEBUG(1, "[timeshift] [pause]");
 			}
 			break;
@@ -3115,7 +3213,7 @@ static int aml_timeshift_do_play_cmd(AV_TimeshiftData_t *tshift, AV_PlayCmd_t cm
 			{
 				if (tshift->pause_time && tshift->current > tshift->pause_time) {
 					AM_DEBUG(1, "[timeshift] [resume] [replay]");
-					aml_timeshift_do_cmd_start(tshift, info);
+					aml_timeshift_do_cmd_start(tshift);
 				} else {
 					tshift->inject_size = 64*1024;
 					tshift->timeout = 0;
@@ -3126,20 +3224,21 @@ static int aml_timeshift_do_play_cmd(AV_TimeshiftData_t *tshift, AV_PlayCmd_t cm
 					aml_start_av_monitor(tshift->dev, &tshift->dev->timeshift_player.mon);
 					AM_DEBUG(1, "[timeshift] [resume]");
 				}
+				aml_timeshift_update_current(tshift);
 			}
 			break;
 		case AV_PLAY_FF:
 		case AV_PLAY_FB:
 			if (tshift->state != AV_TIMESHIFT_STAT_FFFB)
 			{
-				if (tshift->speed == 0 && tshift->state == AV_TIMESHIFT_STAT_PLAY)
+				if (cmd->speed.speed == 0 && tshift->state == AV_TIMESHIFT_STAT_PLAY)
 					return 0;
 				aml_stop_av_monitor(tshift->dev, &tshift->dev->timeshift_player.mon);
 				tshift->inject_size = 64*1024;
 				tshift->timeout = 0;
 				tshift->state = AV_TIMESHIFT_STAT_FFFB;
-				AM_DEBUG(1, "[timeshift] [fast] speed: %d", tshift->speed);
-				if (tshift->last_cmd == AV_PLAY_START)
+				AM_DEBUG(1, "[timeshift] [fast] speed: %d", cmd->speed.speed);
+				if (tshift->last_cmd[0].cmd == AV_PLAY_START)
 				{
 					AM_DEBUG(1, "set di bypass_all to 1");
 					AM_FileEcho(DI_BYPASS_ALL_FILE,"1");
@@ -3147,32 +3246,33 @@ static int aml_timeshift_do_play_cmd(AV_TimeshiftData_t *tshift, AV_PlayCmd_t cm
 				}
 				if (VALID_VIDEO(tshift->tp.vpid, tshift->tp.vfmt))
 					ioctl(tshift->ts.vid_fd, AMSTREAM_IOC_TRICKMODE, TRICKMODE_FFFB);
-				am_timeshift_fffb(tshift);
+				am_timeshift_fffb(tshift, cmd);
+				aml_timeshift_update_current(tshift);
 			}
 			break;
 		case AV_PLAY_SEEK:
 			aml_stop_av_monitor(tshift->dev, &tshift->dev->timeshift_player.mon);
 			if (tshift->para.para.mode == AM_AV_TIMESHIFT_MODE_TIMESHIFTING) {
-				AM_DEBUG(1, "[timeshift] [seek] offset: time: %dms", tshift->seek_pos);
-				AM_TFile_TimeSeek(tshift->file, tshift->seek_pos);
+				AM_DEBUG(1, "[timeshift] [seek] offset: time: %dms", cmd->seek.seek_pos);
+				AM_TFile_TimeSeek(tshift->file, cmd->seek.seek_pos);
 			} else {
-				tshift->seek_pos = am_timeshift_playback_time_check(tshift, tshift->seek_pos);
-				offset = (loff_t)tshift->seek_pos / 1000 * (loff_t)tshift->rate;
+				int pos = am_timeshift_playback_time_check(tshift, cmd->seek.seek_pos);
+				offset = (loff_t)pos / 1000 * (loff_t)tshift->rate;
 #ifdef SUPPORT_CAS
 				if (tshift->para.para.secure_enable) {
 					offset = ROUNDUP(offset, SECURE_BLOCK_SIZE);
 					offset += 188*11;//skip pat and meida info header,clear data not encrypt
 				}
 #endif
-				AM_DEBUG(1, "[timeshift] [seek] offset: time:%dms off:%lld", tshift->seek_pos, offset);
+				AM_DEBUG(1, "[timeshift] [seek] offset: time:%dms off:%lld", pos, offset);
 				AM_TFile_Seek(tshift->file, offset);
 			}
-			info->current_time = tshift->seek_pos;
 			if (VALID_VIDEO(tshift->tp.vpid, tshift->tp.vfmt))
 				ioctl(tshift->ts.vid_fd, AMSTREAM_IOC_TRICKMODE, TRICKMODE_FFFB);
 			am_timeshift_reset(tshift, 0, AM_TRUE);
 			tshift->inject_size = 64*1024;
 			tshift->timeout = 0;
+			aml_timeshift_update_current(tshift);
 			break;
 #if 0
 		case AV_PLAY_RESET_VPATH:
@@ -3224,23 +3324,63 @@ static int aml_timeshift_do_play_cmd(AV_TimeshiftData_t *tshift, AV_PlayCmd_t cm
 		}
 	}
 
-	if (tshift->last_cmd != cmd) {
-		if (tshift->last_cmd != AV_PLAY_SEEK)
-			cmd_changed = 1;
-		tshift->last_cmd = cmd;
+	if (timeshift_cmd_diff(&tshift->last_cmd[0], cmd)) {
+		cmd_changed = 1;
+		if (tshift->last_cmd[0].cmd != AV_PLAY_SEEK)/*for resume from seek*/
+			tshift->last_cmd[1] = tshift->last_cmd[0];
+		tshift->last_cmd[0] = *cmd;
 	}
 
 	if (tshift->state != last_state)
-	{
-		/*Notify status changed*/
-		AM_DEBUG(1, "[timeshift] Notify status changed: 0x%x->0x%x", last_state, tshift->state);
-		info->status = tshift->state;
-		aml_timeshift_update_current(tshift, info);
 		state_changed = 1;
-	}
+
 	return (cmd_changed || state_changed);
 }
 
+int aml_timeshift_do_cmd(AV_TimeshiftData_t *tshift, AV_PlayCmdPara_t *cmd, int notify)
+{
+	int state_changed;
+	AV_PlayCmdPara_t last;
+
+	if ((tshift->last_cmd[0].cmd == AV_PLAY_FF || tshift->last_cmd[0].cmd == AV_PLAY_FB)
+		&& (cmd->cmd == AV_PLAY_PAUSE || cmd->cmd == AV_PLAY_RESUME))
+	{
+		/*
+		 * $ID: 101093,Fixed, timeshift resume decoder is stop when status from FastForward(or FastBack) to Pause directly
+		 */
+		AM_DEBUG(1, "[timeshift] last cmd is %s, cur_cmd is %s, do AV_PLAY_START first",
+			cmd2string(tshift->last_cmd[0].cmd),
+			cmd2string(cmd->cmd));
+		{
+			AV_PlayCmdPara_t c;
+			timeshift_cmd_init(&c, AV_PLAY_START);
+			aml_timeshift_do_play_cmd(tshift, &c);
+		}
+	}
+
+	last = tshift->last_cmd[0];
+	state_changed = aml_timeshift_do_play_cmd(tshift, cmd);
+
+	AM_DEBUG(5, ">>>done cmd:%d, state_changed:%d, do_notify:%d, last:%d", cmd->cmd, state_changed, notify, last.cmd);
+
+	if ((state_changed || notify)
+		&& !((tshift->state == AV_TIMESHIFT_STAT_FFFB || tshift->state == AV_TIMESHIFT_STAT_PAUSE)
+			&& (last.cmd == AV_PLAY_SEEK || last.cmd == AV_PLAY_FF || last.cmd == AV_PLAY_FB || last.cmd == AV_PLAY_PAUSE)))
+	{
+		aml_timeshift_notify(tshift, NULL, AM_TRUE);
+	}
+
+	if (cmd->cmd == AV_PLAY_PAUSE) {
+		if (tshift->pause_time == 0) {
+			tshift->pause_time = tshift->current;
+			AM_DEBUG(1, "[timeshift] paused time: %d", tshift->pause_time);
+		}
+	} else {
+		tshift->pause_time = 0;
+	}
+
+	return 0;
+}
 
 static void aml_timeshift_update_info(AV_TimeshiftData_t *tshift, AM_AV_TimeshiftInfo_t *info)
 {
@@ -3305,25 +3445,7 @@ static int aml_timeshift_fetch_data(AV_TimeshiftData_t *tshift, uint8_t *buf, si
 	return cnt;
 }
 
-static char *cmd2string(int cmd)
-{
-	char buf[64];
-	char *string_cmd[] = {
-	"play_start",        /*AV_PLAY_START*/
-	"play_pause",        /*AV_PLAY_PAUSE*/
-	"play_resume",       /*AV_PLAY_RESUME*/
-	"play_ff",           /*AV_PLAY_FF*/
-	"play_fb",           /*AV_PLAY_FB*/
-	"play_seek",         /*AV_PLAY_SEEK*/
-	"play_reset_vpath",  /*AV_PLAY_RESET_VPATH*/
-	"play_switch_audio"  /*AV_PLAY_SWITCH_AUDIO*/
-	};
-	if (cmd < 0 || cmd > AV_PLAY_SWITCH_AUDIO) {
-		sprintf(buf, "invalid cmd[%d]", cmd);
-		return buf;
-	}
-	return string_cmd[cmd];
-}
+
 #ifdef SUPPORT_CAS
 static int build_drm_pkg(uint8_t *outpktdata, uint8_t *addr, uint32_t size)
 {
@@ -3364,7 +3486,6 @@ static void *aml_timeshift_thread(void *arg)
 	AM_AV_TimeshiftInfo_t info;
 	struct am_io_param astatus;
 	struct am_io_param vstatus;
-	AV_PlayCmd_t cmd;
 	int playback_alen=0, playback_vlen=0;
 	AM_Bool_t is_playback_mode = (tshift->para.para.mode == AM_AV_TIMESHIFT_MODE_PLAYBACK);
 	int vbuf_len = 0;
@@ -3384,76 +3505,63 @@ static void *aml_timeshift_thread(void *arg)
 	AM_Bool_t has_audio = VALID_AUDIO(tp->apid, tp->afmt);
 
 	int do_update;
-	int state_changed;
+	AV_PlayCmdPara_t cmd;
+	int cmd_more;
+	int write_pass;
 
+	memset(&cmd, 0, sizeof(cmd));
 	memset(pts_buf, 0, sizeof(pts_buf));
 	memset(&info, 0, sizeof(info));
-	tshift->last_cmd = -1;
-	if (tshift->para.para.start_paused) {
-		AM_DEBUG(1, "[timeshift] start in pause mode");
-		tshift->cmd = AV_PLAY_PAUSE;
-	}
-	AM_DEBUG(1, "Starting timeshift player thread ...");
-	info.status = AV_TIMESHIFT_STAT_INITOK;
+	timeshift_cmd_init(&tshift->last_cmd[0], -1);
 
-	if (tshift->para.para.mode == AM_AV_TIMESHIFT_MODE_TIMESHIFTING)
-		info.current_time = tshift->offset;
+	pthread_mutex_lock(&tshift->lock);
+	timeshift_cmd_init(&cmd, tshift->para.para.start_paused ? AV_PLAY_PAUSE : AV_PLAY_START);
+	timeshift_cmd_put(tshift, &cmd);
+	pthread_mutex_unlock(&tshift->lock);
+	AM_DEBUG(1, "[timeshift] start in \"%s\" mode", cmd2string(cmd.cmd));
 
-	aml_timeshift_update_notify(tshift, (void*)&info);
-
-	AM_TIME_GetClock(&update_time);
+	tshift->current = tshift->offset;
+	AM_DEBUG(1, "[timeshift] start from offset(%dms)", tshift->offset);
 
 	tshift->dev->cryptor = aml_try_open_crypt(tshift->dev->crypt_ops);
 	AM_DEBUG(1, "[timeshift] crypt mode : %d", (tshift->dev->cryptor)? 1 : 0);
 
 	debug_print = _get_timethift_dbg();
 
-	while (tshift->running || tshift->cmd != tshift->last_cmd )
-	{
-		pthread_mutex_lock(&tshift->lock);
-		cmd = tshift->cmd;
-		speed = tshift->speed;
-		pthread_mutex_unlock(&tshift->lock);
+	AM_DEBUG(1, "Starting timeshift player thread ...");
+	info.status = AV_TIMESHIFT_STAT_INITOK;
 
+	AM_TIME_GetClock(&update_time);
+
+	while (tshift->running)
+	{
 		/*check the audio, in case of audio switch*/
 		has_audio = VALID_AUDIO(tp->apid, tp->afmt);
 
-		if ((tshift->last_cmd == AV_PLAY_FF || tshift->last_cmd == AV_PLAY_FB)
-				&& (cmd == AV_PLAY_PAUSE || cmd == AV_PLAY_RESUME))
-		{
-			/*
-			 * $ID: 101093,Fixed, timeshift resume decoder is stop when status from FastForward(or FastBack) to Pause directly
-			 */
-			AM_DEBUG(1, "[timeshift] last cmd is %s, cur_cmd is %s, do AV_PLAY_START first",
-					cmd2string(tshift->last_cmd),
-					cmd2string(tshift->cmd));
-			aml_timeshift_do_play_cmd(tshift, AV_PLAY_START, &info);
-		}
-		//AM_DEBUG(1, "zzz do cmd:%s", cmd2string(cmd));
-		state_changed = aml_timeshift_do_play_cmd(tshift, cmd, &info);
+		/*consume the cmds*/
+		do {
+			pthread_mutex_lock(&tshift->lock);
+			cmd_more = timeshift_cmd_more(tshift);
+			if (cmd_more)
+				timeshift_cmd_get(tshift, &cmd);
+			AM_DEBUG(5, ">>>exec cmd:%d pos:%d more:%d", cmd.cmd, cmd.seek.seek_pos, cmd_more);
+			pthread_mutex_unlock(&tshift->lock);
 
-		AM_TIME_GetClock(&now);
+			AM_TIME_GetClock(&now);
 
-		do_update = 0;
-		if ((now - update_time) >= 1000) {
-			update_time = now;
-			do_update = 1;
-		}
+			do_update = 0;
+			if ((now - update_time) >= 1000) {
+				update_time = now;
+				do_update = 1;
+			}
 
-		if (state_changed
-			|| (
-				do_update
-				&& (tshift->state != AV_TIMESHIFT_STAT_FFFB)
-				&& (tshift->state != AV_TIMESHIFT_STAT_PAUSE)
-			)
-		) {
-			AM_AV_TimeshiftInfo_t inf;
-			inf.status = info.status;
-			aml_timeshift_get_current(tshift, &inf.current_time, NULL, &inf.full_time);
-			aml_timeshift_notify(tshift, (void*)&inf);
-		}
+			aml_timeshift_do_cmd(tshift, &cmd, do_update);
+		} while (tshift->running && cmd_more);
 
+		/*start data inject*/
 		/*read some bytes*/
+		write_pass = 0;
+
 #ifdef SUPPORT_CAS
 		len = SECURE_BLOCK_SIZE - tshift->left;
 #else
@@ -3553,6 +3661,7 @@ static void *aml_timeshift_thread(void *arg)
 					last_diff = diff;
 					last_adiff = adiff;
 					tshift->timeout = 10;
+					write_pass = 1;
 					goto wait_for_next_loop;
 				}
 			}
@@ -3672,7 +3781,7 @@ while (secure_enable && (tshift->left < len) && tshift->running);
 wait_for_next_loop:
 		/*Update the playing info*/
 		if (tshift->state == AV_TIMESHIFT_STAT_FFFB
-			|| tshift->last_cmd == AV_PLAY_SEEK)
+			|| tshift->last_cmd[0].cmd == AV_PLAY_SEEK)
 		{
 			if(has_video && vpts == 0)
 			{
@@ -3697,93 +3806,99 @@ wait_for_next_loop:
 			AM_DEBUG(1, "[timeshift] trick_stat is %d vpts 0x%x", trick_stat, vpts);
 			if (trick_stat > 0)
 			{
-				AM_DEBUG(1, "[timeshift] last cmd:%d, state:%d", tshift->last_cmd, tshift->state);
-				if (tshift->last_cmd == AV_PLAY_SEEK) {
-					if (tshift->state == AV_TIMESHIFT_STAT_PAUSE)
-						tshift->cmd = AV_PLAY_PAUSE;
-					else if (tshift->state == AV_TIMESHIFT_STAT_FFFB)
-						tshift->cmd = (tshift->speed > 0)? AV_PLAY_FF : AV_PLAY_FB;
-					else if (tshift->state == AV_TIMESHIFT_STAT_PLAY)
-						tshift->cmd = AV_PLAY_START;
-					info.status = tshift->state;
-					aml_timeshift_update_current(tshift, &info);
+				cmd.done = 1;
+
+				/*notify by each step for fffb*/
+				/*notify for seek ready*/
+				aml_timeshift_notify(tshift, NULL, AM_FALSE);
+
+				AM_DEBUG(1, "[timeshift] last cmd:%d, state:%d", tshift->last_cmd[0].cmd, tshift->state);
+				if (cmd.cmd == AV_PLAY_SEEK) {
+					AV_PlayCmdPara_t c;
+
+					/*update for cmd next*/
+					aml_timeshift_update_current(tshift);
+
+					/*seek is not a state, set the next cmd to back to previous state*/
+					if (tshift->state == AV_TIMESHIFT_STAT_PAUSE) {
+						timeshift_cmd_init(&cmd, AV_PLAY_PAUSE);
+						aml_timeshift_do_cmd(tshift, &cmd, 1);
+					} else if (tshift->state == AV_TIMESHIFT_STAT_FFFB) {
+						cmd = tshift->last_cmd[1];
+						aml_timeshift_do_cmd(tshift, &cmd, 1);
+					} else if (tshift->state == AV_TIMESHIFT_STAT_PLAY) {
+						timeshift_cmd_init(&cmd, AV_PLAY_START);
+						aml_timeshift_do_cmd(tshift, &cmd, 1);
+					}
+					aml_timeshift_update_current(tshift);
 				} else {
 					tshift->timeout = FFFB_STEP;
-					am_timeshift_fffb(tshift);
-					info.status = tshift->state;
-					aml_timeshift_update_current(tshift, &info);
-					/*notify by each step for fffb*/
-					aml_timeshift_notify(tshift, &info);
+					am_timeshift_fffb(tshift, &cmd);
+					aml_timeshift_update_current(tshift);
 				}
 			}
-		}
-		else if (do_update)
-		{
-			if (ioctl(tshift->ts.fd, AMSTREAM_IOC_AB_STATUS, (unsigned long)&astatus) != -1 &&
-				((has_video)? (ioctl(tshift->ts.fd, AMSTREAM_IOC_VB_STATUS, (unsigned long)&vstatus) != -1) : AM_TRUE))
+		} else {
+			if (!write_pass)
+				aml_timeshift_update_current(tshift);
+
+			if (do_update)
 			{
-				AM_DEBUG(1, "[timeshift] is_playback_mode = %d, loop = %d",is_playback_mode,tshift->file->loop);
-				AM_DEBUG(1, "[timeshift] timeout %d, len %d, inject %d", tshift->timeout, len, tshift->inject_size);
-
-				if (info.current_time < tshift->start) {
-					AM_DEBUG(1, "[timeshift] reaches start");
-				} else if (info.current_time > tshift->end) {
-					AM_DEBUG(1, "[timeshift] reaches end");
-				}
-
-				if (tshift->state == AV_TIMESHIFT_STAT_PLAY)
+				if (ioctl(tshift->ts.fd, AMSTREAM_IOC_AB_STATUS, (unsigned long)&astatus) != -1 &&
+					((has_video)? (ioctl(tshift->ts.fd, AMSTREAM_IOC_VB_STATUS, (unsigned long)&vstatus) != -1) : AM_TRUE))
 				{
-					/********Skip inject error*********/
-					if (abuf_len != astatus.status.data_len) {
-						abuf_len = astatus.status.data_len;
-						skip_flag_count=0;
-					}
-					if (has_video && (vbuf_len != vstatus.status.data_len)) {
-						vbuf_len =vstatus.status.data_len;
-						skip_flag_count=0;
-					}
+					AM_DEBUG(1, "[timeshift] is_playback_mode = %d, loop = %d",is_playback_mode,tshift->file->loop);
+					AM_DEBUG(1, "[timeshift] timeout %d, len %d, inject %d", tshift->timeout, len, tshift->inject_size);
 
-					if (info.current_time > 0
-						&& astatus.status.data_len == abuf_len
-						&& ((has_video) ? (vstatus.status.data_len == vbuf_len) : AM_FALSE)) {
-						skip_flag_count++;
+					if (tshift->current <= tshift->start) {
+						AM_DEBUG(1, "[timeshift] reaches start");
+					} else if (tshift->current >= tshift->end) {
+						AM_DEBUG(1, "[timeshift] reaches end");
 					}
 
-					if (skip_flag_count >= 4) {
-						AM_DEBUG(1, "[timeshift] av buf stuck");
-						am_timeshift_reset_continue(tshift, -1, AM_TRUE);
-						vbuf_len = 0;
-						abuf_len = 0;
-						skip_flag_count=0;
-					}
-				}
-
-				info.status = tshift->state;
-				aml_timeshift_update_current(tshift, &info);
-
-				if (tshift->last_cmd == AV_PLAY_PAUSE) {
-					if (tshift->pause_time == 0) {
-						tshift->pause_time = tshift->current;
-						AM_DEBUG(1, "zzz paused time: %d", tshift->pause_time);
-					}
-				} else {
-					tshift->pause_time = 0;
-				}
-
-				/*If there is no data available in playback only mode, we send exit event*/
-				if (is_playback_mode && !tshift->file->avail && tshift->state != AV_TIMESHIFT_STAT_PAUSE)
-				{
-					if (playback_alen == astatus.status.data_len &&
-						playback_vlen == vstatus.status.data_len)
+					if (tshift->state == AV_TIMESHIFT_STAT_PLAY)
 					{
-						AM_DEBUG(1, "[timeshift] Playback End");
-						info.current_time = info.full_time;
-						//break;
+						/********Skip inject error*********/
+						if (abuf_len != astatus.status.data_len) {
+							abuf_len = astatus.status.data_len;
+							skip_flag_count=0;
+						}
+						if (has_video && (vbuf_len != vstatus.status.data_len)) {
+							vbuf_len =vstatus.status.data_len;
+							skip_flag_count=0;
+						}
+
+						if (tshift->current > 0
+							&& astatus.status.data_len == abuf_len
+							&& ((has_video) ? (vstatus.status.data_len == vbuf_len) : AM_FALSE)) {
+							skip_flag_count++;
+						}
+
+						if (skip_flag_count >= 4) {
+							AM_DEBUG(1, "[timeshift] av buf stuck");
+							am_timeshift_reset_continue(tshift, -1, AM_TRUE);
+							vbuf_len = 0;
+							abuf_len = 0;
+							skip_flag_count=0;
+						}
 					}
-					else
+
+					/*no data available in playback only mode*/
+					if (is_playback_mode && !tshift->file->avail && tshift->state != AV_TIMESHIFT_STAT_PAUSE)
 					{
-						playback_alen = astatus.status.data_len;
-						playback_vlen = vstatus.status.data_len;
+						if (playback_alen == astatus.status.data_len &&
+							playback_vlen == vstatus.status.data_len)
+						{
+							AM_AV_TimeshiftInfo_t info;
+							AM_DEBUG(1, "[timeshift] Playback End");
+							aml_timeshift_update(tshift, &info);
+							info.current_time = info.full_time;
+							aml_timeshift_notify(tshift, &info, AM_FALSE);
+						}
+						else
+						{
+							playback_alen = astatus.status.data_len;
+							playback_vlen = vstatus.status.data_len;
+						}
 					}
 				}
 			}
@@ -3810,8 +3925,12 @@ wait_for_next_loop:
 	}
 
 	AM_DEBUG(1, "[timeshift] timeshift player thread exit now");
-	info.status = AV_TIMESHIFT_STAT_EXIT;
-	aml_timeshift_update_notify(tshift, (void*)&info);
+	{
+		AM_AV_TimeshiftInfo_t info;
+		aml_timeshift_update(tshift, &info);
+		info.status = AV_TIMESHIFT_STAT_EXIT;
+		aml_timeshift_notify(tshift, &info, AM_FALSE);
+	}
 
 	ioctl(tshift->ts.vid_fd, AMSTREAM_IOC_TRICKMODE, TRICKMODE_NONE);
 	AM_FileEcho(VID_BLACKOUT_FILE, tshift->dev->video_blackout ? "1" : "0");
@@ -3879,20 +3998,22 @@ static AM_ErrorCode_t aml_timeshift_fill_data(AM_AV_Device_t *dev, uint8_t *data
 static AM_ErrorCode_t aml_timeshift_cmd(AM_AV_Device_t *dev, AV_PlayCmd_t cmd, void *para)
 {
 	AV_TimeshiftData_t *data;
+	AV_PlayCmdPara_t cmd_para;
 
 	data = (AV_TimeshiftData_t *)dev->timeshift_player.drv_data;
 
 	pthread_mutex_lock(&data->lock);
-	data->cmd = cmd;
+	timeshift_cmd_init(&cmd_para, cmd);
 	if (cmd == AV_PLAY_FF || cmd == AV_PLAY_FB)
-	{
-		data->speed = (long)para;
-	}
+		cmd_para.speed.speed = (long)para;
 	else if (cmd == AV_PLAY_SEEK)
-	{
-	        data->seek_pos = ((AV_FileSeekPara_t *)para)->pos;
-	}
-	else if (cmd == AV_PLAY_SWITCH_AUDIO)
+		cmd_para.seek.seek_pos = ((AV_FileSeekPara_t *)para)->pos;
+	timeshift_cmd_put(data, &cmd_para);
+	AM_DEBUG(5, ">>>set cmd:%d pos:%d", cmd, cmd_para.seek.seek_pos);
+
+#if 0
+	/*cmd obsoleted, use aml_switch_ts_audio_fmt instead*/
+	if (cmd == AV_PLAY_SWITCH_AUDIO)
 	{
 		AV_TSPlayPara_t *audio_para = (AV_TSPlayPara_t *)para;
 		if (audio_para)
@@ -3911,6 +4032,7 @@ static AM_ErrorCode_t aml_timeshift_cmd(AM_AV_Device_t *dev, AV_PlayCmd_t cmd, v
 			}
 		}
 	}
+#endif
 	pthread_cond_signal(&data->cond);
 	pthread_mutex_unlock(&data->lock);
 
