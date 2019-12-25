@@ -41,6 +41,7 @@ dvbpsi_atsc_content_advisory_dr_t *dvbpsi_decode_atsc_content_advisory_dr(dvbpsi
     dvbpsi_atsc_content_advisory_dr_t *p_decoded;
     uint8_t * buf = p_descriptor->p_data;
     uint8_t * end;
+    int data_len = p_descriptor->i_length;
     int region = 0;
 
     /* Check the tag */
@@ -61,6 +62,7 @@ dvbpsi_atsc_content_advisory_dr_t *dvbpsi_decode_atsc_content_advisory_dr(dvbpsi
 
     p_decoded->i_rating_region_count = 0x2f & buf[0];
     buf++;
+    data_len--;
 
     while (region < p_decoded->i_rating_region_count) {
         dvbpsi_content_advisory_region_t * p_region = &p_decoded->rating_regions[region];
@@ -69,18 +71,30 @@ dvbpsi_atsc_content_advisory_dr_t *dvbpsi_decode_atsc_content_advisory_dr(dvbpsi
         //    || ((buf+2+buf[1]*2) > end)
         //    || ((buf + 3 + buf[1]*2 + buf[2+buf[1]*2]) > end))
         //    break;
-
+        if (data_len < 2)
+            goto ERROR;
         p_region->i_rating_region = buf[0];
         p_region->i_rated_dimensions = buf[1];
         buf += 2;
+        data_len -= 2;
 
         for (int i = 0; i< p_region->i_rated_dimensions; i++) {
+            if (data_len < 2)
+                goto ERROR;
+
             p_region->dimensions[i].i_rating_dimension_j = buf[0];
             p_region->dimensions[i].i_rating_value = buf[1] & 0xf;
             buf += 2;
+            data_len -= 2;
         }
+        if (data_len < 1)
+            goto ERROR;
         p_region->i_rating_description_length = buf[0];
         buf++;
+
+        if (data_len < p_region->i_rating_description_length)
+            goto ERROR;
+
         memset(p_region->i_rating_description, 0, sizeof(p_region->i_rating_description));
         memcpy(p_region->i_rating_description, &buf[0], p_region->i_rating_description_length);
         buf += p_region->i_rating_description_length;
@@ -90,4 +104,7 @@ dvbpsi_atsc_content_advisory_dr_t *dvbpsi_decode_atsc_content_advisory_dr(dvbpsi
 
     p_decoded->i_rating_region_count = region;
     return p_decoded;
+ERROR:
+    free(p_decoded);
+    return NULL;
 }
