@@ -312,8 +312,6 @@ void *adec_handle = NULL;
 
 #define VALID_PID(_pid_) ((_pid_)>0 && (_pid_)<0x1fff)
 
-static int _get_vid_disabled();
-static int _get_aud_disabled();
 static AM_ErrorCode_t set_dec_control(AM_Bool_t enable);
 
 #define VALID_VIDEO(_pid_, _fmt_) (VALID_PID(_pid_))
@@ -810,19 +808,49 @@ static int get_amstream(AM_AV_Device_t *dev)
 
 #define AUD_ASSO_PROP "media.audio.enable_asso"
 #define AUD_ASSO_MIX_PROP "media.audio.mix_asso"
-#define VID_DISABLED_PROP "media.dvb.video.disabled"
-#define AUD_DISABLED_PROP "media.dvb.audio.disabled"
 #define TIMESHIFT_DBG_PROP "tv.dvb.tf.debug"
+/*mode/enable -1=ignore*/
+#define TSYNC_FORCE_PROP "tv.dvb.tsync.force"
+/*v,a,p -1=ignore*/
+#define PID_FORCE_PROP "tv.dvb.pid.force"
+#define FMT_FORCE_PROP "tv.dvb.fmt.force"
 
 static int _get_prop_int(char *prop, int def) {
 	char v[32];
 	int val = 0;
 #ifdef ANDROID
 	property_get(prop, v, "0");
+#else
+	strcpy(v, "0");
 #endif
 	if (sscanf(v, "%d", &val) != 1)
 		val = def;
 	return val;
+}
+
+static int _get_prop_int3(char *prop, int *val1, int *val2, int *val3, int def1, int def2, int def3) {
+	char v[32];
+	int v1 = -1, v2 = -1, v3 = -1;
+	int cnt = 0;
+#ifdef ANDROID
+	property_get(prop, v, "-1,-1,-1");
+#else
+	strcpy(v, "-1,-1,-1");
+#endif
+	cnt = sscanf(v, "%i,%i,%i", &v1, &v2, &v3);
+	if (cnt < 3)
+		v3 = def3;
+	if (cnt < 2)
+		v2 = def2;
+	if (cnt < 1)
+		v1 = def1;
+	if (val1)
+		*val1 = v1;
+	if (val2)
+		*val2 = v2;
+	if (val3)
+		*val3 = v3;
+	return 0;
 }
 
 #define DVB_LOGLEVEL_PROP "tv.dvb.loglevel"
@@ -841,20 +869,6 @@ static int _get_asso_mix() {
 	return 0;
 #endif
 }
-static int _get_vid_disabled() {
-#ifdef ANDROID
-	return property_get_int32(VID_DISABLED_PROP, 0);
-#else
-	return 0;
-#endif
-}
-static int _get_aud_disabled() {
-#ifdef ANDROID
-	return property_get_int32(AUD_DISABLED_PROP, 0);
-#else
-	return 0;
-#endif
-}
 static int _get_dvb_loglevel() {
 #ifdef ANDROID
 	return property_get_int32(DVB_LOGLEVEL_PROP, AM_DEBUG_LOGLEVEL_DEFAULT);
@@ -869,6 +883,48 @@ static int _get_timethift_dbg() {
 	return 0;;
 #endif
 }
+static int _get_tsync_mode_force() {
+	int v;
+	_get_prop_int3(TSYNC_FORCE_PROP, &v, NULL, NULL, -1, -1, -1);
+	return v;
+}
+static int _get_tsync_enable_force() {
+	int v;
+	_get_prop_int3(TSYNC_FORCE_PROP, NULL, &v, NULL, -1, -1, -1);
+	return v;
+}
+
+static void setup_forced_pid(AV_TSPlayPara_t *tp)
+{
+	int v, a, p;
+
+	_get_prop_int3(PID_FORCE_PROP, &v, &a, &p, -1, -1, -1);
+
+	if (v != -1) {
+		tp->vpid = v;
+		AM_DEBUG(1, "force vpid: %d", tp->vpid);
+	}
+	if (a != -1) {
+		tp->apid = a;
+		AM_DEBUG(1, "force apid: %d", tp->apid);
+	}
+	if (p != -1) {
+		tp->pcrpid = p;
+		AM_DEBUG(1, "force ppid: %d", tp->pcrpid);
+	}
+
+	_get_prop_int3(FMT_FORCE_PROP, &v, &a, NULL, -1, -1, -1);
+
+	if (v != -1) {
+		tp->vfmt = v;
+		AM_DEBUG(1, "force vfmt: %d", tp->vfmt);
+	}
+	if (a != -1) {
+		tp->afmt = a;
+		AM_DEBUG(1, "force afmt: %d", tp->afmt);
+	}
+}
+
 static AM_ErrorCode_t adec_aout_open_cb(AM_AOUT_Device_t *dev, const AM_AOUT_OpenPara_t *para)
 {
 	return 0;
@@ -1874,6 +1930,12 @@ int aml_set_tsync_enable(int enable)
 {
 	int fd;
 	char  bcmd[16];
+	int f_en = _get_tsync_enable_force();
+
+	if (f_en != -1) {
+		enable = f_en;
+		AM_DEBUG(1, "force tsync enable to %d", enable);
+	}
 
 	snprintf(bcmd,sizeof(bcmd),"%d",enable);
 
@@ -4397,6 +4459,8 @@ static int aml_calc_sync_mode(AM_AV_Device_t *dev, int has_audio, int has_video,
 
 	if ((tsync_mode == AMASTER) && !has_audio)
 		tsync_mode = VMASTER;
+	else if (ac3_amaster == 0)
+		tsync_mode = PCRMASTER; /*Force use pcrmaster for live-pvr-tf*/
 
 	//printf("tsync mode calc:%d v:%d a:%d af:%d force:%d\n",
 	//	tsync_mode, has_video, has_audio, afmt, force_reason? *force_reason : 0);
@@ -4407,6 +4471,13 @@ static int aml_calc_sync_mode(AM_AV_Device_t *dev, int has_audio, int has_video,
 static int aml_set_sync_mode(AM_AV_Device_t *dev, int mode)
 {
 	char mode_str[4];
+	int f_m = _get_tsync_mode_force();
+
+	if (f_m != -1) {
+		mode = f_m;
+		AM_DEBUG(1, "force tsync mode to %d", mode);
+	}
+
 	set_first_frame_nosync();
 	snprintf(mode_str, 4, "%d", mode);
 	AM_DEBUG(1, "set sync mode: %d", mode);
@@ -4721,6 +4792,14 @@ static int aml_close_ts_mode(AM_AV_Device_t *dev, AM_Bool_t destroy_thread)
 	return 0;
 }
 
+static int aml_restart_ts_mode(AM_AV_Device_t *dev, AM_Bool_t destroy_thread)
+{
+	aml_close_ts_mode(dev, destroy_thread);
+	aml_open_ts_mode(dev);
+	setup_forced_pid(&dev->ts_player.play_para);
+	aml_start_ts_mode(dev, &dev->ts_player.play_para, destroy_thread);
+	return 0;
+}
 
 static inline AM_AV_VideoAspectRatio_t
 convert_aspect_ratio(enum E_ASPECT_RATIO euAspectRatio)
@@ -5623,9 +5702,7 @@ static void* aml_av_monitor_thread(void *arg)
 		if (need_replay && (dev->mode == AV_PLAY_TS) && (AM_ABS(cur_time - last_replay_time) > REPLAY_TIME_INTERVAL)) {
 			AM_DEBUG(1, "[avmon] replay ts vlevel %d alevel %d vpts_stop %d vmaster %d",
 				vbuf_level, abuf_level, vpts_stop_dur, vmaster_dur);
-			aml_close_ts_mode(dev, AM_FALSE);
-			aml_open_ts_mode(dev);
-			aml_start_ts_mode(dev, &dev->ts_player.play_para, AM_FALSE);
+			aml_restart_ts_mode(dev, AM_FALSE);
 			tp = &dev->ts_player.play_para;
 			ts = (AV_TSData_t*)dev->ts_player.drv_data;
 #ifndef ENABLE_PCR
@@ -5913,6 +5990,7 @@ static AM_ErrorCode_t aml_start_mode(AM_AV_Device_t *dev, AV_PlayMode_t mode, vo
 		break;
 		case AV_PLAY_TS:
 			tp = (AV_TSPlayPara_t *)para;
+			setup_forced_pid(tp);
 			dev->alt_apid = tp->apid;
 			dev->alt_afmt = tp->afmt;
 			tp->drm_mode = dev->curr_para.drm_mode;
@@ -5999,6 +6077,7 @@ static AM_ErrorCode_t aml_start_mode(AM_AV_Device_t *dev, AV_PlayMode_t mode, vo
 				tshift->tp.apid = tshift_p->para.media_info.audios[0].pid;
 				tshift->tp.afmt = tshift_p->para.media_info.audios[0].fmt;
 			}
+			setup_forced_pid(&tshift->tp);
 			dev->alt_apid = tshift->tp.apid;
 			dev->alt_afmt = tshift->tp.afmt;
 			if (aml_start_timeshift(tshift, tshift_p, AM_TRUE, AM_TRUE) != AM_SUCCESS)
@@ -7336,10 +7415,16 @@ static AM_ErrorCode_t aml_switch_ts_audio_fmt(AM_AV_Device_t *dev, AV_TSData_t *
 
 static AM_ErrorCode_t aml_switch_ts_audio(AM_AV_Device_t *dev, uint16_t apid, AM_AV_AFormat_t afmt)
 {
-	AV_TSPlayPara_t *tp = NULL;
 	AM_ErrorCode_t err = AM_SUCCESS;
 
 	AM_DEBUG(1, "switch ts audio: A[%d:%d]", apid, afmt);
+
+	{
+		AV_TSPlayPara_t tp = {.apid = apid, .afmt = afmt};
+		setup_forced_pid(&tp);
+		apid = tp.apid;
+		afmt = tp.afmt;
+	}
 
 	dev->alt_apid = apid;
 	dev->alt_afmt = afmt;
