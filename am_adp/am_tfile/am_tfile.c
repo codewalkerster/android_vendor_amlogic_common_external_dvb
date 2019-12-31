@@ -947,7 +947,7 @@ ssize_t AM_TFile_Write(AM_TFile_t tfile, uint8_t *buf, size_t size)
 	size_t len1 = 0, len2 = 0;
 	loff_t fsize, wpos;
 	int now;
-	size_t size_act;
+	size_t size_act = 0;
 	int wrap = 0;
 	int write_fail = 0;
 
@@ -1034,8 +1034,10 @@ ssize_t AM_TFile_Write(AM_TFile_t tfile, uint8_t *buf, size_t size)
 		}
 	}
 
-	size_act = ret + ret2;
 adjust_pos:
+
+	size_act = ret + ret2;
+
 	if (size_act > 0)
 	{
 		pthread_mutex_lock(&tfile->lock);
