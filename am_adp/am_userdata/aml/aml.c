@@ -55,17 +55,21 @@
  ***************************************************************************/
 
 typedef enum {
-	INVALID_TYPE 	= 0,
-	MPEG_CC_TYPE 	= 1,
-	H264_CC_TYPE 	= 2,
-	DIRECTV_CC_TYPE = 3,
-	AVS_CC_TYPE 	= 4,
-	SCTE_CC_TYPE = 5,
-	MPEG_AFD_TYPE = 6,
-	H264_AFD_TYPE = 7,
+	INVALID_TYPE = 0,
+	CC_TYPE_FOR_JUDGE = 10,
+	MPEG_CC_TYPE,
+	H264_CC_TYPE,
+	DIRECTV_CC_TYPE,
+	AVS_CC_TYPE,
+	SCTE_CC_TYPE,
+	AFD_TYPE_FOR_JUDGE = 100,
+	MPEG_AFD_TYPE,
+	H264_AFD_TYPE,
+	USERDATA_TYPE_MAX,
 } userdata_type;
 
-#define IS_AFD_TYPE(p) ((p == MPEG_AFD_TYPE) || (p == H264_AFD_TYPE))
+#define IS_AFD_TYPE(p) (p > AFD_TYPE_FOR_JUDGE && p < USERDATA_TYPE_MAX)
+#define IS_CC_TYPE(p) (p > CC_TYPE_FOR_JUDGE && p < AFD_TYPE_FOR_JUDGE)
 typedef enum {
 	/* 0 forbidden */
 	I_TYPE = 1,
@@ -904,12 +908,14 @@ static void* aml_userdata_thread (void *arg)
 					break;
 
 				ud->format = aml_check_userdata_format(pd, ud->vfmt, left);
-				if (ud->format == INVALID_TYPE ||
-							IS_AFD_TYPE(ud->format))
+				if (!IS_CC_TYPE(ud->format) &&
+					!IS_AFD_TYPE(ud->format))
 				{
 					pd   += 8;
 					left -= 8;
 				}
+				else
+					break;
 			}
 
 			if ((ud->format == MPEG_CC_TYPE) || (ud->format == MPEG_AFD_TYPE)) {
