@@ -106,5 +106,6 @@ dvbpsi_atsc_content_advisory_dr_t *dvbpsi_decode_atsc_content_advisory_dr(dvbpsi
     return p_decoded;
 ERROR:
     free(p_decoded);
+    p_descriptor->p_decoded = NULL;
     return NULL;
 }
