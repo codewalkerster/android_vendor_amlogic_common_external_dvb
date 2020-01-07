@@ -2488,6 +2488,13 @@ static AM_ErrorCode_t aml_start_timeshift(AV_TimeshiftData_t *tshift, AV_TimeShi
 		}
 	}
 
+	AM_DEBUG(1, "try to init subtitle ring buf");
+	int sid = 0xffff;
+	if (ioctl(ts->fd, AMSTREAM_IOC_SID, sid) == -1)
+	{
+		AM_DEBUG(1, "set sub PID failed");
+	}
+
 #if defined(ANDROID) || defined(CHIP_8626X)
 	/*Set tsync enable/disable*/
 	if (has_video && (has_audio && start_audio))
@@ -2727,8 +2734,7 @@ static void aml_check_audio_state(void)
 	}
 }
 
-/**\brief 释放Timeshift相关数据*/
-static void aml_destroy_timeshift_data(AV_TimeshiftData_t *tshift, AM_Bool_t destroy_thread)
+static void aml_stop_timeshift(AV_TimeshiftData_t *tshift, AM_Bool_t destroy_thread)
 {
 	char buf[64];
 
@@ -2750,9 +2756,7 @@ static void aml_destroy_timeshift_data(AV_TimeshiftData_t *tshift, AM_Bool_t des
 #endif
 	}
 
-	if (tshift->ts.fd != -1)
-	{
-
+	if (tshift->ts.fd != -1) {
 		AM_DEBUG(1, "Stopping Audio decode");
 		aml_set_ad_source(&tshift->ts.ad, 0, 0, 0, tshift->ts.adec);
 		audio_ops->adec_set_decode_ad(0, 0, 0, tshift->ts.adec);
@@ -2777,23 +2781,25 @@ static void aml_destroy_timeshift_data(AV_TimeshiftData_t *tshift, AM_Bool_t des
 			AM_FileEcho(DI_BYPASS_ALL_FILE,"0");
 		}
 	}
+}
 
-	if (destroy_thread) {
+/**\brief 释放Timeshift相关数据*/
+static void aml_destroy_timeshift_data(AV_TimeshiftData_t *tshift)
+{
 #ifdef SUPPORT_CAS
-		if (tshift->buf) {
-			free(tshift->buf);
-			tshift->buf = NULL;
-		}
-#endif
-		free(tshift);
+	if (tshift->buf) {
+		free(tshift->buf);
+		tshift->buf = NULL;
 	}
+#endif
+	free(tshift);
 }
 
 static int am_timeshift_reset(AV_TimeshiftData_t *tshift, int deinterlace_val, AM_Bool_t start_audio)
 {
 	UNUSED(deinterlace_val);
 
-	aml_destroy_timeshift_data(tshift, AM_FALSE);
+	aml_stop_timeshift(tshift, AM_FALSE);
 	if (start_audio)
 		aml_check_audio_state();
 	aml_start_timeshift(tshift, &tshift->para, AM_FALSE, start_audio);
@@ -2810,7 +2816,7 @@ static int am_timeshift_reset_continue(AV_TimeshiftData_t *tshift, int deinterla
 	UNUSED(deinterlace_val);
 	AM_DEBUG(1, "am_timeshift_reset_continue reset inject size");
 	tshift->inject_size = 0;
-	aml_destroy_timeshift_data(tshift, AM_FALSE);
+	aml_stop_timeshift(tshift, AM_FALSE);
 
 	aml_start_timeshift(tshift, &tshift->para, AM_FALSE, start_audio);
 	tshift->inject_size = 64*1024;
@@ -3046,7 +3052,7 @@ static int aml_timeshift_do_play_cmd(AV_TimeshiftData_t *tshift, AV_PlayCmd_t cm
 			if (VALID_VIDEO(tshift->tp.vpid, tshift->tp.vfmt))
 				ioctl(tshift->ts.vid_fd, AMSTREAM_IOC_TRICKMODE, TRICKMODE_NONE);
 			/*stop play first*/
-			aml_destroy_timeshift_data(tshift, AM_FALSE);
+			aml_stop_timeshift(tshift, AM_FALSE);
 			/*reset the vpath*/
 			aml_set_vpath(tshift->dev);
 			/*restart play now*/
@@ -4240,36 +4246,7 @@ static AM_ErrorCode_t aml_open_ts_mode(AM_AV_Device_t *dev)
 
 	memset(ts, 0, sizeof(*ts));
 	ts->fd     = -1;
-	ts->vid_fd = open(AMVIDEO_FILE, O_RDWR);
-
-#ifndef MPTSONLYAUDIOVIDEO
-	if (check_vfmt_support_sched(dev->ts_player.play_para.vfmt) == AM_FALSE)
-	{
-		ts->fd = open(STREAM_TS_FILE, O_RDWR);
-		if (ts->fd == -1)
-		{
-			AM_DEBUG(1, "cannot open \"/dev/amstream_mpts\" error:%d \"%s\"", errno, strerror(errno));
-			free(ts);
-			return AM_AV_ERR_CANNOT_OPEN_DEV;
-		}
-	}
-	else
-	{
-		ts->fd = open(STREAM_TS_SCHED_FILE, O_RDWR);
-		if (ts->fd == -1)
-		{
-			AM_DEBUG(1, "cannot open \"/dev/amstream_mpts_sched\" error:%d \"%s\"", errno, strerror(errno));
-			free(ts);
-			return AM_AV_ERR_CANNOT_OPEN_DEV;
-		}
-	}
-	AM_DEBUG(1, "try to init subtitle ring buf");
-	int sid = 0xffff;
-	if (ioctl(ts->fd, AMSTREAM_IOC_SID, sid) == -1)
-	{
-		AM_DEBUG(1, "set sub PID failed");
-	}
-#endif
+	ts->vid_fd = -1;
 
 	dev->ts_player.drv_data = (void*)ts;
 
@@ -4391,7 +4368,36 @@ static AM_ErrorCode_t aml_start_ts_mode(AM_AV_Device_t *dev, AV_TSPlayPara_t *tp
 	AM_DEBUG(1, "%s, enable pcr -------", __FUNCTION__);
 #endif
 
-#ifdef MPTSONLYAUDIOVIDEO
+	ts->vid_fd = open(AMVIDEO_FILE, O_RDWR);
+
+#ifndef MPTSONLYAUDIOVIDEO
+	if (check_vfmt_support_sched(tp->vfmt) == AM_FALSE)
+	{
+		ts->fd = open(STREAM_TS_FILE, O_RDWR);
+		if (ts->fd == -1)
+		{
+			AM_DEBUG(1, "cannot open \"/dev/amstream_mpts\" error:%d \"%s\"", errno, strerror(errno));
+			free(ts);
+			return AM_AV_ERR_CANNOT_OPEN_DEV;
+		}
+	}
+	else
+	{
+		ts->fd = open(STREAM_TS_SCHED_FILE, O_RDWR);
+		if (ts->fd == -1)
+		{
+			AM_DEBUG(1, "cannot open \"/dev/amstream_mpts_sched\" error:%d \"%s\"", errno, strerror(errno));
+			free(ts);
+			return AM_AV_ERR_CANNOT_OPEN_DEV;
+		}
+	}
+	AM_DEBUG(1, "try to init subtitle ring buf");
+	int sid = 0xffff;
+	if (ioctl(ts->fd, AMSTREAM_IOC_SID, sid) == -1)
+	{
+		AM_DEBUG(1, "set sub PID failed");
+	}
+#else
 	if (ts->fd == -1)
 	{
 
@@ -4435,6 +4441,7 @@ static AM_ErrorCode_t aml_start_ts_mode(AM_AV_Device_t *dev, AV_TSPlayPara_t *tp
 		}
 	}
 #endif
+
 	if (tp->drm_mode == AM_AV_DRM_WITH_SECURE_INPUT_BUFFER)
 	{
 		if (ioctl(ts->fd, AMSTREAM_IOC_SET_DRMMODE, (void *)(long)tp->drm_mode) == -1)
@@ -5972,7 +5979,8 @@ static AM_ErrorCode_t aml_close_mode(AM_AV_Device_t *dev, AV_PlayMode_t mode)
 		break;
 		case AV_TIMESHIFT:
 			tshift = dev->timeshift_player.drv_data;
-			aml_destroy_timeshift_data(tshift, AM_TRUE);
+			aml_stop_timeshift(tshift, AM_TRUE);
+			aml_destroy_timeshift_data(tshift);
 			dev->timeshift_player.drv_data = NULL;
 			m_tshift = NULL;
 		break;
