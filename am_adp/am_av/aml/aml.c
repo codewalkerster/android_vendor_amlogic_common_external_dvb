@@ -4862,6 +4862,28 @@ static void* aml_av_monitor_thread(void *arg)
 			vrp_stop_dur  = 0;
 		}
 		last_vbuf_read_ptr = vbuf_read_ptr;
+		//check video frame available
+		if (has_video && !no_video_data) {
+#ifdef ANDROID
+			if (AM_FileRead(VIDEO_NEW_FRAME_COUNT_FILE, buf, sizeof(buf)) >= 0) {
+				sscanf(buf, "%i", &vframes_now);
+				if ((vframes_now >= 1) ) {
+					if (no_video) {
+						AM_DEBUG(1, "[avmon] video available SwitchSourceTime = %fs",getUptimeSeconds());
+						AM_EVT_Signal(dev->dev_no, AM_AV_EVT_VIDEO_AVAILABLE, NULL);
+					}
+					no_video = AM_FALSE;
+					} else {
+						no_video = AM_TRUE;
+					}
+					vframes_last = vframes_now;
+				} else {
+				AM_DEBUG(1, "[avmon] cannot read \"%s\"", VIDEO_NEW_FRAME_TOGGLED_FILE);
+				vframes_now = 0;
+			}
+#endif
+		}
+
 		if (has_video)
 		{
 			memset(&vstatus, 0, sizeof(vstatus));
@@ -5247,30 +5269,6 @@ static void* aml_av_monitor_thread(void *arg)
 			}
 		}
 #endif
-
-		//check video frame available
-		if (has_video && !no_video_data) {
-#ifdef ANDROID
-			if (AM_FileRead(VIDEO_NEW_FRAME_COUNT_FILE, buf, sizeof(buf)) >= 0) {
-				sscanf(buf, "%i", &vframes_now);
-
-				if ((vframes_now >= 1) ) {
-					if (no_video) {
-						AM_DEBUG(1, "[avmon] video available SwitchSourceTime = %fs",getUptimeSeconds());
-						AM_EVT_Signal(dev->dev_no, AM_AV_EVT_VIDEO_AVAILABLE, NULL);
-					}
-					no_video = AM_FALSE;
-				} else {
-					no_video = AM_TRUE;
-				}
-
-				vframes_last = vframes_now;
-			} else {
-				AM_DEBUG(1, "[avmon] cannot read \"%s\"", VIDEO_NEW_FRAME_TOGGLED_FILE);
-				vframes_now = 0;
-			}
-#endif
-		}
 
 		//first no_data
 		if (has_audio && adec_start && !no_audio_data && (dmx_apts_stop_dur > NO_DATA_CHECK_TIME) && (arp_stop_dur > NO_DATA_CHECK_TIME)) {
