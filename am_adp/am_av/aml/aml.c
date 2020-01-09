@@ -533,6 +533,8 @@ static int aml_restart_inject_mode(AM_AV_Device_t *dev, AM_Bool_t destroy_thread
 static AM_ErrorCode_t aml_get_pts(AM_AV_Device_t *dev, int type, uint64_t *pts);
 static AM_ErrorCode_t aml_get_timeout_real(int timeout, struct timespec *ts);
 static void aml_timeshift_update_info(AV_TimeshiftData_t *tshift, AM_AV_TimeshiftInfo_t *info);
+static AM_ErrorCode_t aml_set_fe_status(AM_AV_Device_t *dev, int value);
+
 
 const AM_AV_Driver_t aml_av_drv =
 {
@@ -564,6 +566,8 @@ const AM_AV_Driver_t aml_av_drv =
 .timeshift_get_tfile = aml_timeshift_get_tfile,
 .set_audio_cb = aml_set_audio_cb,
 .get_pts = aml_get_pts,
+.set_fe_status = aml_set_fe_status,
+
 };
 
 /*音频控制（通过解码器）操作*/
@@ -682,6 +686,7 @@ static AM_AUDIO_Driver_t *audio_ops = &native_audio_drv;
 #else
 static AM_AUDIO_Driver_t *audio_ops = &callback_audio_drv;
 #endif
+int g_festatus = 0;
 
 /*监控AV buffer, PTS 操作*/
 static pthread_mutex_t gAVMonLock = PTHREAD_MUTEX_INITIALIZER;
@@ -5357,10 +5362,11 @@ static void* aml_av_monitor_thread(void *arg)
 				AM_DMX_GetScrambleStatus(0, sf);
 				if (sf[1]) {
 					audio_scrambled = AM_TRUE;
-					if (!no_data_evt) {
+					if (!no_data_evt || g_festatus) {
 						AM_EVT_Signal(dev->dev_no, AM_AV_EVT_AUDIO_SCAMBLED, NULL);
 						AM_DEBUG(1, "[avmon] audio scrambled > stoped");
 						no_data_evt = AM_TRUE;
+						g_festatus = 0;
 					}
 				}
 			}
@@ -5375,10 +5381,11 @@ static void* aml_av_monitor_thread(void *arg)
 				AM_DMX_GetScrambleStatus(0, sf);
 				if (sf[0]) {
 					video_scrambled = AM_TRUE;
-					if (!no_data_evt) {
+					if (!no_data_evt || g_festatus) {
 						AM_EVT_Signal(dev->dev_no, AM_AV_EVT_VIDEO_SCAMBLED, NULL);
 						AM_DEBUG(1, "[avmon] video scrambled");
 						no_data_evt = AM_TRUE;
+						g_festatus = 0;
 					}
 				}
 			}
@@ -7740,6 +7747,13 @@ static AM_ErrorCode_t aml_get_pts(AM_AV_Device_t *dev, int type, uint64_t *pts)
 		*pts += 0x100000000L;
 
 	return AM_SUCCESS;
+}
+
+static AM_ErrorCode_t aml_set_fe_status(AM_AV_Device_t *dev, int value)
+{
+    AM_DEBUG(1,"aml_set_fe_status value = %d",value);
+    g_festatus = value;
+    return AM_SUCCESS;
 }
 
 AM_ErrorCode_t aml_get_timeout_real(int timeout, struct timespec *ts)

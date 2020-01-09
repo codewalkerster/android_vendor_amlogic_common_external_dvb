@@ -537,6 +537,25 @@ AM_ErrorCode_t AM_AV_SetTSSource(int dev_no, AM_AV_TSSource_t src)
 	return ret;
 }
 
+/**\brief 设置FrontEnd的锁定状态
+ * \param dev_no 音视频设备号
+ * \param value FrontEnd的状态
+ * \return
+ *   - AM_SUCCESS 成功
+ *   - 其他值 错误代码(见am_av.h)
+ */
+
+AM_ErrorCode_t AM_AV_setFEStatus(int dev_no,int value)
+{
+	AM_AV_Device_t *dev;
+	AM_ErrorCode_t ret = AM_SUCCESS;
+	AM_TRY(av_get_openned_dev(dev_no, &dev));
+	if (dev->drv->set_fe_status) {
+		ret = dev->drv->set_fe_status(dev,value);
+	}
+	return ret;
+}
+
 /**\brief 开始解码TS流
  * \param dev_no 音视频设备号
  * \param vpid 视频流PID

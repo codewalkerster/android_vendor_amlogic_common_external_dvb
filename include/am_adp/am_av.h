@@ -1237,6 +1237,16 @@ extern AM_ErrorCode_t AM_AV_GetAudioPts(int dev_no, uint64_t *pts);
  * \return Error code
  */
 extern AM_ErrorCode_t AM_AV_SetCryptOps(int dev_no, AM_Crypt_Ops_t *ops);
+
+/**
+ * brief Set Crypt operators
+ * \param dev_no AV decoder device number
+ * \param value Fendend Status
+ * \retval AM_SUCCESS On success
+ * \return Error code
+ */
+extern AM_ErrorCode_t AM_AV_setFEStatus(int dev_no,int value);
+
 #ifdef __cplusplus
 }
 #endif
