@@ -3045,6 +3045,7 @@ static int am_timeshift_reset(AV_TimeshiftData_t *tshift, int deinterlace_val, A
 {
 	UNUSED(deinterlace_val);
 
+	AM_DEBUG(1, "am_timeshift_reset");
 	aml_stop_timeshift(tshift, AM_FALSE);
 	if (start_audio)
 		aml_check_audio_state();
@@ -3158,20 +3159,32 @@ static int aml_timeshift_resume_av(AV_TimeshiftData_t *tshift)
 static int aml_timeshift_do_cmd_start(AV_TimeshiftData_t *tshift)
 {
 	loff_t offset;
+	int seeked = 0;
 
 	tshift->inject_size = 64*1024;
 	tshift->timeout = 0;
 	tshift->state = AV_TIMESHIFT_STAT_PLAY;
-	AM_DEBUG(1, "[timeshift] [start] seek to time %d s...", tshift->current);
+	AM_DEBUG(1, "[timeshift] [start] seek to time %d ms...", tshift->current);
 	if (tshift->para.para.mode == AM_AV_TIMESHIFT_MODE_TIMESHIFTING) {
-		AM_TFile_TimeSeek(tshift->file, tshift->current);
+		if (AM_TFile_TimeGetReadNow(tshift->file) != tshift->current) {
+			AM_TFile_TimeSeek(tshift->file, tshift->current);
+			seeked = 1;
+		}
 	} else {//rec play
-		offset = (loff_t)tshift->current / 1000 * (loff_t)tshift->rate;
-		AM_TFile_Seek(tshift->file, offset);
+		loff_t off = AM_TFile_Tell(tshift->file);
+		int current = off * 1000 / (loff_t)tshift->rate;
+		AM_DEBUG(1, "[timeshift] [start] file now[%lld][%dms] rate[%dbps]", off, current, tshift->rate);
+		if (current != tshift->current) {
+			offset = (loff_t)tshift->current / 1000 * (loff_t)tshift->rate;
+			AM_TFile_Seek(tshift->file, offset);
+			seeked = 1;
+		}
 	}
 	if (VALID_VIDEO(tshift->tp.vpid, tshift->tp.vfmt))
 		ioctl(tshift->ts.vid_fd, AMSTREAM_IOC_TRICKMODE, TRICKMODE_NONE);
-	am_timeshift_reset(tshift, 2, AM_TRUE);
+
+	if (seeked)
+		am_timeshift_reset(tshift, 2, AM_TRUE);
 
 	//if (tshift->last_cmd == AV_PLAY_FF || tshift->last_cmd == AV_PLAY_FB)
 	{
