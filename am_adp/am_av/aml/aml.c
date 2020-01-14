@@ -731,6 +731,24 @@ static float getUptimeSeconds() {
 
     return (float)(ts.tv_sec +(float)ts.tv_nsec / 1000000000);
 }
+
+static AM_Bool_t configure_vdec_info(int fd, char *p_info, uint32_t len)
+{
+	struct am_ioctl_parm_ptr param;
+
+	memset(&param, 0, sizeof(param));
+	param.cmd = AMSTREAM_SET_PTR_CONFIGS;
+	param.pointer = p_info;
+	param.len = len;
+
+	if (ioctl(fd, AMSTREAM_IOC_SET_PTR, (unsigned long)&param) == -1)
+	{
+		AM_DEBUG(1, "configure vdec info [%s] failed\n", p_info);
+		return AM_FALSE;
+	}
+	AM_DEBUG(1, "configure vdec info [%s] success\n", p_info);
+	return AM_TRUE;
+}
 static AM_Bool_t check_vfmt_support_sched(AM_AV_VFormat_t vfmt)
 {
 	if (vfmt == VFORMAT_MPEG12 ||
@@ -2064,6 +2082,8 @@ static AM_ErrorCode_t aml_start_inject(AM_AV_Device_t *dev, AV_InjectData_t *inj
 	AM_AV_InjectPara_t *para = &inj_para->para;
 	AM_Bool_t has_video = VALID_VIDEO(para->vid_id, para->vid_fmt);
 	AM_Bool_t has_audio = VALID_AUDIO(para->aud_id, para->aud_fmt);
+	char vdec_info[256];
+	int double_write_mode = 3;
 
 	if (para->aud_id != dev->alt_apid || para->aud_fmt != dev->alt_afmt) {
 		AM_DEBUG(1, "switch to pending audio: A[%d:%d] -> A[%d:%d]",
@@ -2205,6 +2225,15 @@ static AM_ErrorCode_t aml_start_inject(AM_AV_Device_t *dev, AV_InjectData_t *inj
 		{
 			AM_DEBUG(1, "set AMSTREAM_IOC_SYSINFO");
 			return AM_AV_ERR_SYS;
+		}
+		/*configure double wirte mode*/
+		memset(vdec_info, 0, sizeof(vdec_info));
+		if (para->vid_fmt == VFORMAT_HEVC) {
+			sprintf(vdec_info, "hevc_double_write_mode:%d", double_write_mode);
+			configure_vdec_info(vfd, vdec_info, strlen(vdec_info));
+		} else if (para->vid_fmt == VFORMAT_VP9) {
+			sprintf(vdec_info, "vp9_double_write_mode:%d", double_write_mode);
+			configure_vdec_info(vfd, vdec_info, strlen(vdec_info));
 		}
 
 	}
@@ -2486,6 +2515,8 @@ static AM_ErrorCode_t aml_start_timeshift(AV_TimeshiftData_t *tshift, AV_TimeShi
 	AM_AV_Device_t *dev = tshift->dev;
 	int val;
 	int sync_mode, sync_force;
+	char vdec_info[256];
+	int double_write_mode = 3;
 
 	AM_Bool_t has_video = VALID_VIDEO(tp->vpid, tp->vfmt);
 	AM_Bool_t has_audio = VALID_AUDIO(tp->apid, tp->afmt);
@@ -2643,6 +2674,15 @@ static AM_ErrorCode_t aml_start_timeshift(AV_TimeshiftData_t *tshift, AV_TimeShi
 		{
 			AM_DEBUG(1, "set AMSTREAM_IOC_SYSINFO");
 			return AM_AV_ERR_SYS;
+		}
+		/*configure double write mode*/
+		memset(vdec_info, 0, sizeof(vdec_info));
+		if (tp->vfmt == VFORMAT_HEVC) {
+			sprintf(vdec_info, "hevc_double_write_mode:%d", double_write_mode);
+			configure_vdec_info(ts->fd, vdec_info, strlen(vdec_info));
+		} else if (tp->vfmt == VFORMAT_VP9) {
+			sprintf(vdec_info, "vp9_double_write_mode:%d", double_write_mode);
+			configure_vdec_info(ts->fd, vdec_info, strlen(vdec_info));
 		}
 	}
 
@@ -4492,6 +4532,8 @@ static AM_ErrorCode_t aml_start_ts_mode(AM_AV_Device_t *dev, AV_TSPlayPara_t *tp
 	AM_Bool_t has_audio = VALID_AUDIO(tp->apid, tp->afmt);
 	AM_Bool_t has_pcr = VALID_PCR(tp->pcrpid);
 	int sync_mode, sync_force;
+	char vdec_info[256];
+	int double_write_mode = 3;
 
 	if (tp->apid != dev->alt_apid || tp->afmt != dev->alt_afmt) {
 		AM_DEBUG(1, "switch to pending audio: A[%d:%d] -> A[%d:%d]",
@@ -4674,6 +4716,15 @@ static AM_ErrorCode_t aml_start_ts_mode(AM_AV_Device_t *dev, AV_TSPlayPara_t *tp
 		{
 			AM_DEBUG(1, "set AMSTREAM_IOC_SYSINFO");
 			return AM_AV_ERR_SYS;
+		}
+		/*configure double wirte mode*/
+		memset(vdec_info, 0, sizeof(vdec_info));
+		if (tp->vfmt == VFORMAT_HEVC) {
+			sprintf(vdec_info, "hevc_double_write_mode:%d", double_write_mode);
+			configure_vdec_info(ts->fd, vdec_info, strlen(vdec_info));
+		} else if (tp->vfmt == VFORMAT_VP9) {
+			sprintf(vdec_info, "vp9_double_write_mode:%d", double_write_mode);
+			configure_vdec_info(ts->fd, vdec_info, strlen(vdec_info));
 		}
 	}
 
