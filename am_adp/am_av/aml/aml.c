@@ -108,7 +108,7 @@ void *adec_handle = NULL;
 #define NO_DATA_CHECK_TIME           2000
 #define VMASTER_REPLAY_TIME          4000
 #define SCRAMBLE_CHECK_TIME          1000
-#define TIMESHIFT_INJECT_DIFF_TIME	 4
+#define TIMESHIFT_INJECT_DIFF_TIME	 (90000*4)
 #define TIMESHIFT_FFFB_ERROR_CNT	 5
 #define VIDEO_AVAILABLE_MIN_CNT     2
 #define TIME_UNIT90K                 90000
@@ -2554,6 +2554,25 @@ void tfile_evt_callback ( long dev_no, int event_type, void *param, void *user_d
 	}
 }
 
+static int aml_av_get_delay(int fd, int video_not_audio)
+{
+	int d = 0;
+
+	if (ioctl(fd, (video_not_audio)?
+			AMSTREAM_IOC_GET_VIDEO_CUR_DELAY_MS:
+			AMSTREAM_IOC_GET_AUDIO_CUR_DELAY_MS,
+			&d) != -1)
+		return ((d > (30 * 1000)) || (d < (1 * 1000))) ? 0 : d;
+
+	return 0;
+}
+
+static int aml_timeshift_get_delay(AV_TimeshiftData_t *tshift)
+{
+	AM_Bool_t has_video = VALID_VIDEO(tshift->tp.vpid, tshift->tp.vfmt);
+
+	return aml_av_get_delay(tshift->ts.fd, has_video);
+}
 
 static void aml_timeshift_get_current(AV_TimeshiftData_t *tshift, int *current, int *start, int *end)
 {
@@ -2589,26 +2608,20 @@ static void aml_timeshift_notify(AV_TimeshiftData_t *tshift, AM_AV_TimeshiftInfo
 {
 	AM_AV_TimeshiftInfo_t inf;
 	AM_Bool_t has_video = VALID_VIDEO(tshift->tp.vpid, tshift->tp.vfmt);
-	int vdelay = 0, adelay = 0, delay = 0;
+	int delay = 0;
 
 	if (!info) {
 		info = &inf;
 		aml_timeshift_update(tshift, info);
 	}
 
-	if (has_video) {
-		if (ioctl(tshift->ts.fd, AMSTREAM_IOC_GET_VIDEO_CUR_DELAY_MS, &vdelay) != -1)
-			delay = vdelay;
-	} else {
-		if (ioctl(tshift->ts.fd, AMSTREAM_IOC_GET_AUDIO_CUR_DELAY_MS, &adelay) != -1)
-			delay = adelay;
-	}
+	delay = aml_timeshift_get_delay(tshift);
 
 	if (calc_delay)
 		info->current_time -= delay;
 
-	AM_DEBUG(1, "[timeshift] notify: status[%d] current[%d] full[%d] -delay[%d:%d:%d]",
-		info->status, info->current_time, info->full_time, vdelay, adelay, delay);
+	AM_DEBUG(1, "[timeshift] notify: status[%d] current[%d] full[%d] -delay[%d]",
+		info->status, info->current_time, info->full_time, delay);
 
 	AM_EVT_Signal(0, AM_AV_EVT_PLAYER_UPDATE_INFO, (void*)info);
 	aml_timeshift_update_info(tshift, info);
@@ -3197,6 +3210,7 @@ static int aml_timeshift_do_play_cmd(AV_TimeshiftData_t *tshift, AV_PlayCmdPara_
 		case AV_PLAY_PAUSE:
 			//if (tshift->state != AV_TIMESHIFT_STAT_PAUSE)
 			{
+				AM_DEBUG(1, "[timeshift] [pause]");
 				aml_stop_av_monitor(tshift->dev, &tshift->dev->timeshift_player.mon);
 				tshift->inject_size = 0;
 				tshift->timeout = 1000;
@@ -3205,7 +3219,6 @@ static int aml_timeshift_do_play_cmd(AV_TimeshiftData_t *tshift, AV_PlayCmdPara_
 					ioctl(tshift->ts.vid_fd, AMSTREAM_IOC_TRICKMODE, TRICKMODE_NONE);
 				aml_timeshift_pause_av(tshift);
 				aml_timeshift_update_current(tshift);
-				AM_DEBUG(1, "[timeshift] [pause]");
 			}
 			break;
 		case AV_PLAY_RESUME:
@@ -3224,6 +3237,7 @@ static int aml_timeshift_do_play_cmd(AV_TimeshiftData_t *tshift, AV_PlayCmdPara_
 					aml_start_av_monitor(tshift->dev, &tshift->dev->timeshift_player.mon);
 					AM_DEBUG(1, "[timeshift] [resume]");
 				}
+
 				aml_timeshift_update_current(tshift);
 			}
 			break;
@@ -3370,14 +3384,8 @@ int aml_timeshift_do_cmd(AV_TimeshiftData_t *tshift, AV_PlayCmdPara_t *cmd, int 
 		aml_timeshift_notify(tshift, NULL, AM_TRUE);
 	}
 
-	if (cmd->cmd == AV_PLAY_PAUSE) {
-		if (tshift->pause_time == 0) {
-			tshift->pause_time = tshift->current;
-			AM_DEBUG(1, "[timeshift] paused time: %d", tshift->pause_time);
-		}
-	} else {
+	if (cmd->cmd != AV_PLAY_PAUSE)
 		tshift->pause_time = 0;
-	}
 
 	return 0;
 }
@@ -3618,23 +3626,23 @@ static void *aml_timeshift_thread(void *arg)
 				if (vpts > dmx_vpts) {
 					diff = 0;
 				} else {
-					diff = (dmx_vpts - vpts)/90000;
+					diff = dmx_vpts - vpts;
 				}
 
 				if (apts > dmx_apts) {
 					adiff = 0;
 				} else {
-					adiff = (dmx_apts - apts)/90000;
+					adiff = dmx_apts - apts;
 				}
 
 
 				/*fixme: may need more condition according to fmt*/
 				#define IS_ALEVEL_OK(_data_len, _afmt) ((_data_len) > 768)
-				#define IS_ADUR_OK(_adiff, _afmt)      ((_adiff) > TIMESHIFT_INJECT_DIFF_TIME)
+				#define IS_ADUR_OK(_adiff, _afmt)      ((_adiff) >= TIMESHIFT_INJECT_DIFF_TIME)
 				#define IS_ADATA_OK(_data_len, _adiff, _afmt)  (IS_ALEVEL_OK(_data_len, _afmt) || IS_ADUR_OK(_adiff, _afmt))
 
 				#define IS_VLEVEL_OK(_data_len, _vfmt) ((_data_len) > DEC_STOP_VIDEO_LEVEL)
-				#define IS_VDUR_OK(_vdiff, _vfmt)      ((_vdiff) > TIMESHIFT_INJECT_DIFF_TIME)
+				#define IS_VDUR_OK(_vdiff, _vfmt)      ((_vdiff) >= TIMESHIFT_INJECT_DIFF_TIME)
 				#define IS_VDATA_OK(_data_len, _vdiff, _vfmt)  (IS_VLEVEL_OK(_data_len, _vfmt) && IS_VDUR_OK(_vdiff, _vfmt))
 
 				/*prevent the data sink into buffer all, which causes sub/txt lost*/
@@ -3840,6 +3848,13 @@ wait_for_next_loop:
 		} else {
 			if (!write_pass)
 				aml_timeshift_update_current(tshift);
+
+			if (tshift->state == AV_TIMESHIFT_STAT_PAUSE) {
+				if (tshift->pause_time == 0) {
+					tshift->pause_time = tshift->current;
+					AM_DEBUG(1, "[timeshift] paused time: %d", tshift->pause_time);
+				}
+			}
 
 			if (do_update)
 			{
