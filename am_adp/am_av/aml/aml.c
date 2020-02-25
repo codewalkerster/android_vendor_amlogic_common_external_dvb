@@ -2984,6 +2984,7 @@ static void aml_stop_timeshift(AV_TimeshiftData_t *tshift, AM_Bool_t destroy_thr
 {
 	char buf[64];
 
+	AM_Bool_t has_audio = VALID_AUDIO(tshift->tp.apid, tshift->tp.afmt);
 	if (tshift->running && destroy_thread)
 	{
 		tshift->running = 0;
@@ -3003,13 +3004,15 @@ static void aml_stop_timeshift(AV_TimeshiftData_t *tshift, AM_Bool_t destroy_thr
 	}
 
 	if (tshift->ts.fd != -1) {
-		AM_DEBUG(1, "Stopping Audio decode");
-		aml_set_ad_source(&tshift->ts.ad, 0, 0, 0, tshift->ts.adec);
-		audio_ops->adec_set_decode_ad(0, 0, 0, tshift->ts.adec);
-		audio_ops->adec_stop_decode(&tshift->ts.adec);
-		AM_DEBUG(1, "Closing mpts");
-		close(tshift->ts.fd);
-		tshift->ts.fd = -1;
+            AM_DEBUG(1, "Stopping Audio decode");
+            if (has_audio) {
+                aml_set_ad_source(&tshift->ts.ad, 0, 0, 0, tshift->ts.adec);
+                audio_ops->adec_set_decode_ad(0, 0, 0, tshift->ts.adec);
+                audio_ops->adec_stop_decode(&tshift->ts.adec);
+            }
+            AM_DEBUG(1, "Closing mpts");
+            close(tshift->ts.fd);
+            tshift->ts.fd = -1;
 	}
 	AM_DEBUG(1, "Closing demux 1");
 	if (tshift->dmxfd != -1)
@@ -3161,6 +3164,7 @@ static int aml_timeshift_do_cmd_start(AV_TimeshiftData_t *tshift)
 	loff_t offset;
 	int seeked = 0;
 
+        AV_TimeshiftState_t last_stat =  tshift->state;
 	tshift->inject_size = 64*1024;
 	tshift->timeout = 0;
 	tshift->state = AV_TIMESHIFT_STAT_PLAY;
@@ -3183,7 +3187,7 @@ static int aml_timeshift_do_cmd_start(AV_TimeshiftData_t *tshift)
 	if (VALID_VIDEO(tshift->tp.vpid, tshift->tp.vfmt))
 		ioctl(tshift->ts.vid_fd, AMSTREAM_IOC_TRICKMODE, TRICKMODE_NONE);
 
-	if (seeked)
+	if (seeked || last_stat == AV_TIMESHIFT_STAT_FFFB)
 		am_timeshift_reset(tshift, 2, AM_TRUE);
 
 	//if (tshift->last_cmd == AV_PLAY_FF || tshift->last_cmd == AV_PLAY_FB)
