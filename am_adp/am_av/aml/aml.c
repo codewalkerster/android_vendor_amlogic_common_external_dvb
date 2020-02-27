@@ -3890,28 +3890,32 @@ wait_for_next_loop:
 					if (tshift->state == AV_TIMESHIFT_STAT_PLAY)
 					{
 						/********Skip inject error*********/
-						if (abuf_len != astatus.status.data_len) {
+						if (has_audio && (abuf_len != astatus.status.data_len)) {
 							abuf_len = astatus.status.data_len;
-							skip_flag_count=0;
+							skip_flag_count &= 0xFF00;
 						}
 						if (has_video && (vbuf_len != vstatus.status.data_len)) {
 							vbuf_len =vstatus.status.data_len;
-							skip_flag_count=0;
+							skip_flag_count &= 0xFF;
 						}
 
 						if (tshift->current > 0
-							&& astatus.status.data_len == abuf_len
 							&& ((has_video) ? (vstatus.status.data_len == vbuf_len) : AM_FALSE)) {
-							skip_flag_count++;
+							skip_flag_count += 0x100;
+						}
+						if (tshift->current > 0
+							&& ((has_audio) ? (astatus.status.data_len == abuf_len) : AM_FALSE)) {
+							skip_flag_count += 0x1;
 						}
 
-						if (skip_flag_count >= 4) {
-							AM_DEBUG(1, "[timeshift] av buf stuck not reset,count:%d", skip_flag_count);
+						if ((skip_flag_count & 0xff) >= 4
+							|| (skip_flag_count & 0xff00) >= 0x400) {
+							AM_DEBUG(1, "[timeshift] av buf stuck, reset DISABLED, skip_cnt:0x%04x", skip_flag_count);
 							if (tshift->dev->replay_enable) {
-							    am_timeshift_reset_continue(tshift, -1, AM_TRUE);
-							    vbuf_len = 0;
-							    abuf_len = 0;
-							    skip_flag_count=0;
+								am_timeshift_reset_continue(tshift, -1, AM_TRUE);
+								vbuf_len = 0;
+								abuf_len = 0;
+								skip_flag_count=0;
 							}
 						}
 					}
