@@ -3714,7 +3714,7 @@ static void *aml_timeshift_thread(void *arg)
 					if (fetch_fail == 1000)
 					{
 						AM_DEBUG(1, "[timeshift] data break, eof, try:%d", len);
-						AM_EVT_Signal(tshift->dev->dev_no, AM_AV_EVT_PLAYER_EOF, NULL);
+						//AM_EVT_Signal(tshift->dev->dev_no, AM_AV_EVT_PLAYER_EOF, NULL);
 					}
 
 					if (errno == EIO && is_playback_mode)
@@ -3878,8 +3878,39 @@ wait_for_next_loop:
 				if (ioctl(tshift->ts.fd, AMSTREAM_IOC_AB_STATUS, (unsigned long)&astatus) != -1 &&
 					((has_video)? (ioctl(tshift->ts.fd, AMSTREAM_IOC_VB_STATUS, (unsigned long)&vstatus) != -1) : AM_TRUE))
 				{
-					AM_DEBUG(1, "[timeshift] is_playback_mode = %d, loop = %d",is_playback_mode,tshift->file->loop);
-					AM_DEBUG(1, "[timeshift] timeout %d, len %d, inject %d", tshift->timeout, len, tshift->inject_size);
+					int play_eof = 0;
+
+					AM_DEBUG(1, "[timeshift] is_playback:%d, loop:%d, timeout:%d len:%d inj:%d, cur:%d, delay:%d",
+						is_playback_mode,
+						tshift->file->loop,
+						tshift->timeout,
+						len,
+						tshift->inject_size,
+						tshift->current,
+						aml_timeshift_get_delay(tshift));
+
+					/*no data available in playback only mode*/
+					if (is_playback_mode
+						&& tshift->state != AV_TIMESHIFT_STAT_PAUSE
+						&& abs(tshift->current - aml_timeshift_get_delay(tshift)) >= tshift->end)
+					{
+						if (playback_alen == astatus.status.data_len &&
+							playback_vlen == vstatus.status.data_len)
+						{
+							AM_AV_TimeshiftInfo_t info;
+							AM_DEBUG(1, "[timeshift] Playback End");
+							aml_timeshift_update(tshift, &info);
+							info.current_time = info.full_time;
+							aml_timeshift_notify(tshift, &info, AM_FALSE);
+							AM_EVT_Signal(tshift->dev->dev_no, AM_AV_EVT_PLAYER_EOF, NULL);
+							play_eof = 1;
+						}
+						else
+						{
+							playback_alen = astatus.status.data_len;
+							playback_vlen = vstatus.status.data_len;
+						}
+					}
 
 					if (tshift->current <= tshift->start) {
 						AM_DEBUG(1, "[timeshift] reaches start");
@@ -3887,7 +3918,8 @@ wait_for_next_loop:
 						AM_DEBUG(1, "[timeshift] reaches end");
 					}
 
-					if (tshift->state == AV_TIMESHIFT_STAT_PLAY)
+					if (tshift->state == AV_TIMESHIFT_STAT_PLAY
+						&& !play_eof)
 					{
 						/********Skip inject error*********/
 						if (has_audio && (abuf_len != astatus.status.data_len)) {
@@ -3920,24 +3952,6 @@ wait_for_next_loop:
 						}
 					}
 
-					/*no data available in playback only mode*/
-					if (is_playback_mode && !tshift->file->avail && tshift->state != AV_TIMESHIFT_STAT_PAUSE)
-					{
-						if (playback_alen == astatus.status.data_len &&
-							playback_vlen == vstatus.status.data_len)
-						{
-							AM_AV_TimeshiftInfo_t info;
-							AM_DEBUG(1, "[timeshift] Playback End");
-							aml_timeshift_update(tshift, &info);
-							info.current_time = info.full_time;
-							aml_timeshift_notify(tshift, &info, AM_FALSE);
-						}
-						else
-						{
-							playback_alen = astatus.status.data_len;
-							playback_vlen = vstatus.status.data_len;
-						}
-					}
 				}
 			}
 		}
