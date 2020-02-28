@@ -3906,11 +3906,13 @@ wait_for_next_loop:
 						}
 
 						if (skip_flag_count >= 4) {
-							AM_DEBUG(1, "[timeshift] av buf stuck");
-							am_timeshift_reset_continue(tshift, -1, AM_TRUE);
-							vbuf_len = 0;
-							abuf_len = 0;
-							skip_flag_count=0;
+							AM_DEBUG(1, "[timeshift] av buf stuck not reset,count:%d", skip_flag_count);
+							if (tshift->dev->replay_enable) {
+							    am_timeshift_reset_continue(tshift, -1, AM_TRUE);
+							    vbuf_len = 0;
+							    abuf_len = 0;
+							    skip_flag_count=0;
+							}
 						}
 					}
 
@@ -4632,8 +4634,6 @@ static int aml_calc_sync_mode(AM_AV_Device_t *dev, int has_audio, int has_video,
 	}
 
 	tsync_mode = PCRMASTER;
-	if (!has_pcr)
-		tsync_mode = AMASTER;
 
 	if (ac3_amaster) {
 		//force
@@ -4641,12 +4641,6 @@ static int aml_calc_sync_mode(AM_AV_Device_t *dev, int has_audio, int has_video,
 		if (force_reason)
 			*force_reason = FORCE_AC3_AMASTER;
 	}
-
-	//no pcrmaster for timeshifting
-	if ((tsync_mode == PCRMASTER)
-		&& ((dev->mode == AV_TIMESHIFT)
-			||(dev->mode == AV_INJECT)))
-		tsync_mode = AMASTER;
 
 	if ((aml_get_audio_digital_raw() != 0) && is_dts_dolby)
 		tsync_mode = AMASTER;
@@ -5821,10 +5815,6 @@ static void* aml_av_monitor_thread(void *arg)
 				av_paused = AM_FALSE;
 			}
 
-			if (tsync_mode != 1) {
-				AM_DEBUG(1,"tsync_mode change to A_master.");
-				AM_FileEcho(TSYNC_MODE_FILE,"1");
-			}
 			if (!av_paused) {
 				if (has_audio && adec_start) {
 					AM_DEBUG(1, "[avmon] AV_INJECT audio resume");
