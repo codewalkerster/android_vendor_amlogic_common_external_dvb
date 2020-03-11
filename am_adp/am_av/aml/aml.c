@@ -2726,14 +2726,14 @@ static AM_ErrorCode_t aml_start_timeshift(AV_TimeshiftData_t *tshift, AV_TimeShi
 			return AM_AV_ERR_CANNOT_OPEN_DEV;
 		}
 	}
-#ifdef USE_AMSTREAM_SUB_BUFFER
+
 	AM_DEBUG(1, "try to init subtitle ring buf");
 	int sid = 0xffff;
 	if (ioctl(ts->fd, AMSTREAM_IOC_SID, sid) == -1)
 	{
 		AM_DEBUG(1, "set sub PID failed");
 	}
-#endif
+
 #if defined(ANDROID) || defined(CHIP_8626X)
 	/*Set tsync enable/disable*/
 	if (has_video && (has_audio && start_audio))
@@ -4750,14 +4750,12 @@ static AM_ErrorCode_t aml_start_ts_mode(AM_AV_Device_t *dev, AV_TSPlayPara_t *tp
 			return AM_AV_ERR_CANNOT_OPEN_DEV;
 		}
 	}
-#ifdef USE_AMSTREAM_SUB_BUFFER
 	AM_DEBUG(1, "try to init subtitle ring buf");
 	int sid = 0xffff;
 	if (ioctl(ts->fd, AMSTREAM_IOC_SID, sid) == -1)
 	{
 		AM_DEBUG(1, "set sub PID failed");
 	}
-#endif
 #else
 	if (ts->fd == -1)
 	{
